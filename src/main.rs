@@ -92,6 +92,7 @@ async fn run_node(
     info!("OpenCoin Node starting...");
     info!("Data directory: {}", expanded_dir);
 
+    let has_premine_key = premine_key_hex.is_some();
     let premine_kp = match premine_key_hex {
         Some(key_hex) => {
             let key_bytes = hex::decode(&key_hex)?;
@@ -151,12 +152,23 @@ async fn run_node(
         bc.set_storage(storage.clone());
     }
 
-    let wallet = Arc::new(RwLock::new(Some({
-        if let Some(ref storage) = storage {
-            let s = storage.lock().unwrap();
-            if let Ok(Some(saved_wallet)) = s.load_wallet() {
-                info!("Loaded wallet from storage: balance={}, txs={}", saved_wallet.balance, saved_wallet.transactions.len());
-                saved_wallet
+    let wallet = Arc::new(RwLock::new({
+        if has_premine_key {
+            if let Some(ref storage) = storage {
+                let s = storage.lock().unwrap();
+                if let Ok(Some(saved_wallet)) = s.load_wallet() {
+                    info!("Loaded wallet from storage: balance={}, txs={}", saved_wallet.balance, saved_wallet.transactions.len());
+                    Some(saved_wallet)
+                } else {
+                    let mut w = Wallet::from_keypair(premine_kp, "premine");
+                    w.transactions.push([0u8; 32]);
+                    use opencoin::chain::transaction::OutPoint;
+                    let premine_outpoint = OutPoint { tx_hash: [0u8; 32], index: 0 };
+                    w.utxos.insert("premine".to_string(), (premine_outpoint, config::PREMINE_AMOUNT));
+                    w.balance = config::PREMINE_AMOUNT;
+                    let _ = s.save_wallet(&w);
+                    Some(w)
+                }
             } else {
                 let mut w = Wallet::from_keypair(premine_kp, "premine");
                 w.transactions.push([0u8; 32]);
@@ -164,19 +176,12 @@ async fn run_node(
                 let premine_outpoint = OutPoint { tx_hash: [0u8; 32], index: 0 };
                 w.utxos.insert("premine".to_string(), (premine_outpoint, config::PREMINE_AMOUNT));
                 w.balance = config::PREMINE_AMOUNT;
-                let _ = s.save_wallet(&w);
-                w
+                Some(w)
             }
         } else {
-            let mut w = Wallet::from_keypair(premine_kp, "premine");
-            w.transactions.push([0u8; 32]);
-            use opencoin::chain::transaction::OutPoint;
-            let premine_outpoint = OutPoint { tx_hash: [0u8; 32], index: 0 };
-            w.utxos.insert("premine".to_string(), (premine_outpoint, config::PREMINE_AMOUNT));
-            w.balance = config::PREMINE_AMOUNT;
-            w
+            None
         }
-    })));
+    }));
     let p2p = {
         let mut p = P2PNetwork::new(p2p_port, blockchain.clone()).with_wallet(wallet.clone());
         if let Some(ref storage) = storage {
