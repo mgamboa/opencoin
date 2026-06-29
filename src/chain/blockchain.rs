@@ -142,6 +142,8 @@ impl Blockchain {
             .map(|t| t.total_output())
             .sum::<u64>();
 
+        self.blocks.push(block.clone());
+
         for tx in &block.transactions {
             if tx.tx_type != TransactionType::Coinbase {
                 self.utxo_set.insert(hex::encode(tx.hash()), tx.clone());
