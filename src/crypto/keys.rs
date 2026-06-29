@@ -248,9 +248,8 @@ pub fn generate_keypair() -> KeyPair {
 }
 
 pub fn public_key_to_address(public_key: &PublicKey) -> String {
-    let hash = crate::crypto::hash::blake3_hash(&public_key.0);
     let mut address = String::from("OC");
-    address.push_str(&hex::encode(&hash[..30]));
+    address.push_str(&hex::encode(public_key.0));
     let checksum = crate::crypto::hash::double_sha3_256(address.as_bytes());
     address.push_str(&hex::encode(&checksum[..4]));
     address

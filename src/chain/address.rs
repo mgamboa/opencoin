@@ -1,4 +1,4 @@
-use crate::crypto::keys::{PublicKey, public_key_to_address, SecretKey};
+use crate::crypto::keys::{PublicKey, public_key_to_address};
 use crate::crypto::stealth::StealthAddress;
 use serde::{Deserialize, Serialize};
 
@@ -40,7 +40,7 @@ impl OpenCoinAddress {
     }
 
     pub fn from_string(s: &str) -> Result<Self, &'static str> {
-        if !s.starts_with("OC") || s.len() != 76 {
+        if !s.starts_with("OC") || s.len() != 74 {
             return Err("Invalid address format");
         }
         let pub_hex = &s[2..66];
