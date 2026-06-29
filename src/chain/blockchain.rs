@@ -68,9 +68,17 @@ impl Blockchain {
             Some(s) => s,
             None => return Ok(None),
         };
-        let blocks = storage.get_all_blocks()?;
+        let mut blocks = storage.get_all_blocks()?;
         if blocks.is_empty() {
             return Ok(None);
+        }
+        blocks.sort_by_key(|b| b.header.height);
+        let has_genesis = blocks.first().map_or(false, |b| b.header.height == 0);
+        if !has_genesis {
+            let genesis_tx = Transaction::coinbase(0, &premine_address);
+            let mut genesis = Block::genesis(genesis_tx.clone());
+            genesis.header.merkle_root = merkle_root(&[genesis_tx.hash()]);
+            blocks.insert(0, genesis);
         }
         let mut utxo_set = HashMap::new();
         for block in &blocks {
@@ -162,7 +170,7 @@ impl Blockchain {
     }
 
     pub fn get_block(&self, height: u64) -> Option<&Block> {
-        self.blocks.get(height as usize)
+        self.blocks.iter().find(|b| b.header.height == height)
     }
 
     pub fn get_block_by_hash(&self, hash: &[u8; 32]) -> Option<&Block> {
@@ -170,9 +178,11 @@ impl Blockchain {
     }
 
     pub fn is_valid(&self) -> bool {
-        for i in 1..self.blocks.len() {
-            let prev = &self.blocks[i - 1];
-            let curr = &self.blocks[i];
+        let mut sorted: Vec<&Block> = self.blocks.iter().collect();
+        sorted.sort_by_key(|b| b.header.height);
+        for i in 1..sorted.len() {
+            let prev = sorted[i - 1];
+            let curr = sorted[i];
             if curr.header.previous_hash != prev.hash() {
                 return false;
             }
