@@ -123,6 +123,11 @@ impl Blockchain {
                     return Err("Coinbase exceeds reward");
                 }
             }
+            if tx.tx_type == TransactionType::Transfer {
+                if let Err(e) = tx.verify_signatures() {
+                    return Err(e);
+                }
+            }
         }
         if !coinbase_found {
             return Err("Missing coinbase transaction");
@@ -151,6 +156,10 @@ impl Blockchain {
             if tx.tx_type != TransactionType::Coinbase {
                 self.utxo_set.insert(hex::encode(tx.hash()), tx.clone());
             }
+            for input in &tx.inputs {
+                let spent_key = format!("{}:{}", hex::encode(input.outpoint.tx_hash), input.outpoint.index);
+                self.utxo_set.remove(&spent_key);
+            }
         }
 
         if let Some(ref storage) = self.storage {
@@ -170,6 +179,55 @@ impl Blockchain {
 
     pub fn get_block_by_hash(&self, hash: &[u8; 32]) -> Option<&Block> {
         self.blocks.iter().find(|b| b.hash() == *hash)
+    }
+
+    pub fn try_accept_chain(&mut self, new_blocks: Vec<Block>) -> Result<(), &'static str> {
+        if new_blocks.is_empty() {
+            return Ok(());
+        }
+        let new_last = new_blocks.last().unwrap();
+        let new_work: u128 = new_blocks.iter()
+            .map(|b| 1u128 << (64 - b.header.difficulty_target))
+            .sum();
+        if new_work <= self.state.total_work && new_last.header.height <= self.state.height {
+            return Err("Chain has less work than current chain");
+        }
+        for block in &new_blocks {
+            if block.header.height == 0 { continue; }
+            if self.get_block_by_hash(&block.header.previous_hash).is_none() &&
+               !new_blocks.iter().any(|b| b.hash() == block.header.previous_hash) {
+                return Err("Cannot find previous block in chain");
+            }
+            let target = crate::consensus::difficulty::compact_to_target(block.header.difficulty_target);
+            if !check_pow(block, target) {
+                return Err("Block does not meet difficulty target");
+            }
+        }
+        for block in &new_blocks {
+            let height = block.header.height;
+            if height <= self.state.height {
+                if let Some(existing) = self.get_block(height) {
+                    if existing.hash() != block.hash() {
+                        let idx = self.blocks.iter().position(|b| b.header.height == height).unwrap();
+                        self.blocks.remove(idx);
+                        let _ = self.blocks.push(block.clone());
+                    }
+                }
+            } else {
+                self.blocks.push(block.clone());
+                self.state.height = block.header.height;
+                self.state.current_hash = block.hash();
+                self.state.total_work += 1u128 << (64 - block.header.difficulty_target);
+                for tx in &block.transactions {
+                    if tx.tx_type == TransactionType::Coinbase {
+                        self.state.circulating_supply += tx.total_output();
+                    }
+                }
+            }
+        }
+        self.state.current_hash = new_last.hash();
+        self.state.height = new_last.header.height;
+        Ok(())
     }
 
     pub fn is_valid(&self) -> bool {

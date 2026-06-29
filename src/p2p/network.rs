@@ -314,30 +314,28 @@ async fn handle_message2(
         }
         Message::Blocks(blocks) => {
             info!("Received {} blocks from {}", blocks.len(), addr);
+            if blocks.is_empty() { return; }
             let mut bc = blockchain.write().await;
-            for block in blocks {
-                let height = block.header.height;
-                if height > bc.state.height {
-                    if let Err(e) = bc.add_block(block.clone()) {
-                        warn!("Failed to add block {} from peer: {}", height, e);
-                        break;
-                    }
-                    info!("Synced block {}", height);
+            match bc.try_accept_chain(blocks.clone()) {
+                Ok(()) => {
+                    info!("Chain updated to height {}", bc.state.height);
                     drop(bc);
-                    if let Some(ref w) = wallet {
-                        let mut wallet_lock = w.write().await;
+                    let w = wallet.clone();
+                    if let Some(ref w_ref) = w {
+                        let mut wallet_lock = w_ref.write().await;
                         if let Some(ref mut wlt) = *wallet_lock {
-                            if wlt.scan_block(&block) > 0 {
-                                if let Some(ref st) = storage {
-                                    if let Ok(s) = st.lock() {
-                                        let _ = s.save_wallet(wlt);
-                                    }
+                            for block in &blocks {
+                                wlt.scan_block(block);
+                            }
+                            if let Some(ref st) = storage {
+                                if let Ok(s) = st.lock() {
+                                    let _ = s.save_wallet(wlt);
                                 }
                             }
                         }
                     }
-                    bc = blockchain.write().await;
                 }
+                Err(e) => warn!("Failed to accept chain from peer: {}", e),
             }
         }
         Message::GetPeers => {

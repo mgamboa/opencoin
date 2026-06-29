@@ -14,27 +14,23 @@ pub fn calculate_difficulty(blocks: &[Block]) -> u64 {
         return 1;
     }
 
-    let first_ts = window_blocks[0].header.timestamp;
-    let last_ts = window_blocks[window_blocks.len() - 1].header.timestamp;
-    let time_span = last_ts.saturating_sub(first_ts);
+    let mut timestamps: Vec<u64> = window_blocks.iter().map(|b| b.header.timestamp).collect();
+    timestamps.sort_unstable();
+    let mid = timestamps.len() / 2;
+    let median_first = if mid > 0 { timestamps[mid / 2] } else { timestamps[0] };
+    let median_last = if mid > 0 { timestamps[mid + mid / 2] } else { timestamps[timestamps.len() - 1] };
+    let time_span = median_last.saturating_sub(median_first).max(1);
 
     let expected_time = config::DIFFICULTY_TARGET_SECONDS * (window_blocks.len() as u64 - 1);
-    if time_span == 0 {
-        return 1;
-    }
 
-    let mut difficulty: u64 = 1;
+    let mut total_diff = 0u128;
     for block in window_blocks {
-        let block_diff = compact_to_difficulty(block.header.difficulty_target);
-        difficulty = difficulty.saturating_add(block_diff);
+        total_diff += compact_to_difficulty(block.header.difficulty_target) as u128;
     }
-    difficulty = difficulty / (window_blocks.len() as u64);
-    if difficulty == 0 {
-        difficulty = 1;
-    }
+    let avg_diff = (total_diff / window_blocks.len() as u128) as u64;
 
     let adjustment = (time_span as f64 / expected_time as f64).clamp(0.25, 4.0);
-    (difficulty as f64 * adjustment) as u64
+    (avg_diff as f64 / adjustment) as u64
 }
 
 pub fn difficulty_to_compact(difficulty: u64) -> u32 {

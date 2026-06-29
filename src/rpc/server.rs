@@ -280,12 +280,14 @@ async fn wallet_html(wallet: &Arc<RwLock<Option<Wallet>>>) -> String {
             let addr = wallet_data.address_string().unwrap_or_default();
             let bal = wallet_data.balance;
             let locked = wallet_data.locked_balance;
+            let utxo_count = wallet_data.utxos.len();
             format!(
                 r##"<div class=card><h2>Wallet</h2>
 <table>
 <tr><td>Address</td><td style=font-size:11px;word-break:break-all>{addr}</td></tr>
 <tr><td>Balance</td><td id=balance>{bal} OC</td></tr>
 <tr><td>Locked</td><td id=locked>{locked} OC</td></tr>
+<tr><td>UTXOs</td><td>{utxo_count}</td></tr>
 </table></div>
 <div class=card><h2>Send Coins</h2>
 <form id=sendForm onsubmit="sendCoins(event)">
@@ -341,11 +343,12 @@ async fn blocks_html(blockchain: &Arc<RwLock<Blockchain>>) -> String {
     let height = bc.state.height;
     let start = if height > 20 { height - 20 } else { 0 };
     let mut rows = String::new();
+    let mut tx_detail = String::new();
     for h in (start..=height).rev() {
         if let Some(block) = bc.get_block(h) {
             let hash = hex::encode(block.hash());
             let short_hash = &hash[..16];
-            let (reward, recipient) = block.transactions.first()
+            let (reward, recipient, tx_count) = block.transactions.first()
                 .map(|tx| {
                     let total: u64 = tx.outputs.iter().map(|o| o.amount).sum();
                     let addr = tx.outputs.first()
@@ -354,24 +357,42 @@ async fn blocks_html(blockchain: &Arc<RwLock<Blockchain>>) -> String {
                             format!("{}...", hex_addr)
                         })
                         .unwrap_or_default();
-                    (total, addr)
+                    (total, addr, block.transactions.len())
                 })
-                .unwrap_or((0, String::new()));
+                .unwrap_or((0, String::new(), 0));
             rows.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-                h,
-                short_hash,
-                reward,
-                recipient,
-                block.header.timestamp,
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                h, short_hash, reward, recipient, tx_count, block.header.timestamp,
             ));
+            if h == height {
+                for (ti, tx) in block.transactions.iter().enumerate() {
+                    let txh = hex::encode(tx.hash());
+                    tx_detail.push_str(&format!(
+                        "<div class=card style=font-size:12px><b>TX #{}:</b> {}<br>",
+                        ti, &txh[..32]
+                    ));
+                    for (oi, output) in tx.outputs.iter().enumerate() {
+                        let addr = hex::encode(&output.stealth_address.spend_pub.0[..8]);
+                        tx_detail.push_str(&format!("  Output {}: {} OC → {}...<br>", oi, output.amount, addr));
+                    }
+                    if !tx.inputs.is_empty() {
+                        for (ii, input) in tx.inputs.iter().enumerate() {
+                            let prev = hex::encode(&input.outpoint.tx_hash[..8]);
+                            tx_detail.push_str(&format!("  Input {}: from {}:{}<br>", ii, prev, input.outpoint.index));
+                        }
+                    }
+                    tx_detail.push_str("</div>");
+                }
+            }
         }
     }
     format!(
         r##"<div class=card><h2>Recent Blocks (last 20)</h2>
 <table>
-<tr><th>Height</th><th>Hash</th><th>Reward</th><th>Miner</th><th>Timestamp</th></tr>
-{rows}</table></div>"##
+<tr><th>Height</th><th>Hash</th><th>Reward</th><th>Miner</th><th>TXs</th><th>Timestamp</th></tr>
+{rows}</table></div>
+<h2>Latest Block Details</h2>
+{tx_detail}"##
     )
 }
 
@@ -492,57 +513,58 @@ async fn handle_rpc_request(
         "sendtoaddress" => {
             let to_address = params.get(0).and_then(|p| p.as_str()).unwrap_or("").to_string();
             let amount = params.get(1).and_then(|p| p.as_u64()).unwrap_or(0);
-            let fee = params.get(2).and_then(|p| p.as_u64()).unwrap_or(crate::config::COIN / 1000);
+            let fee = params.get(2).and_then(|p| p.as_u64()).unwrap_or(crate::config::COIN / 10000);
 
             if to_address.is_empty() || amount == 0 {
                 serde_json::json!({"error": "Invalid parameters: need address and amount"})
             } else if let Ok(oc_addr) = crate::chain::address::OpenCoinAddress::from_string(&to_address) {
                 let w = wallet.read().await;
                 if let Some(w_ref) = w.as_ref() {
-                    if amount + fee > w_ref.balance {
+                    let needed = amount + fee;
+                    if needed > w_ref.balance {
                         serde_json::json!({"error": "Insufficient balance"})
                     } else {
-                        let sender_stealth = w_ref.stealth_address().unwrap();
+                        let sender_kp = w_ref.keypair().unwrap();
                         let recipient_stealth = oc_addr.to_stealth();
-                        let change = w_ref.balance - amount - fee;
+                        let utxos = w_ref.get_utxos_for_amount(needed);
+                        drop(w);
+
                         let tx = crate::chain::transaction::Transaction::transfer(
-                            &sender_stealth, &recipient_stealth, amount, fee, change
+                            &sender_kp, &recipient_stealth, amount, fee, &utxos
                         );
                         let tx_hash = tx.hash();
-                        drop(w);
 
                         let mut w = wallet.write().await;
                         if let Some(ref mut wallet) = *w {
-                            wallet.balance = wallet.balance.saturating_sub(amount + fee);
-                            wallet.transactions.push(tx_hash);
-                        }
-                    drop(w);
-
-                    if let Some(ref st) = storage {
-                        let mut w = wallet.write().await;
-                        if let Some(ref wlt) = *w {
-                            if let Ok(s) = st.lock() {
-                                let _ = s.save_wallet(wlt);
+                            for (outpoint, _) in &utxos {
+                                let key = format!("{}:{}", hex::encode(outpoint.tx_hash), outpoint.index);
+                                wallet.utxos.remove(&key);
                             }
+                            wallet.transactions.push(tx_hash);
+                            wallet.balance = wallet.utxos.values().map(|(_, a)| a).sum();
                         }
-                    }
-
-                    p2p.broadcast_transaction(&tx).await;
-                        let _ = p2p.add_to_mempool(tx.clone()).await;
+                        drop(w);
 
                         if let Some(ref st) = storage {
-                            if let Ok(s) = st.lock() {
-                                let _ = s.save_transaction(&tx);
-                                let _ = s.flush();
+                            let w = wallet.read().await;
+                            if let Some(ref wlt) = *w {
+                                if let Ok(s) = st.lock() {
+                                    let _ = s.save_wallet(wlt);
+                                    let _ = s.save_transaction(&tx);
+                                    let _ = s.flush();
+                                }
                             }
                         }
+
+                        p2p.broadcast_transaction(&tx).await;
+                        let _ = p2p.add_to_mempool(tx.clone()).await;
 
                         serde_json::json!({
                             "tx_hash": hex::encode(tx_hash),
                             "amount": amount,
                             "fee": fee,
                             "to": to_address,
-                            "change": change,
+                            "change": utxos.iter().map(|(_, a)| a).sum::<u64>() - amount - fee,
                         })
                     }
                 } else {

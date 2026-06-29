@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::crypto::keys::{KeyPair, PublicKey, SecretKey, generate_keypair, public_key_to_address};
 use crate::crypto::stealth::{StealthAddress, create_stealth_output, recover_stealth_output, OneTimeOutput};
-use crate::chain::transaction::{Transaction, TransactionType, TxInput, TxOutput};
+use crate::chain::transaction::{OutPoint, Transaction, TransactionType, TxInput, TxOutput};
 use crate::chain::block::Block;
 use crate::chain::address::OpenCoinAddress;
 
@@ -15,6 +16,7 @@ pub struct Wallet {
     pub locked_balance: u64,
     pub transactions: Vec<[u8; 32]>,
     pub name: String,
+    pub utxos: HashMap<String, (OutPoint, u64)>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -35,6 +37,7 @@ impl Wallet {
             locked_balance: 0,
             transactions: Vec::new(),
             name: name.to_string(),
+            utxos: HashMap::new(),
         }
     }
 
@@ -48,6 +51,7 @@ impl Wallet {
             locked_balance: 0,
             transactions: Vec::new(),
             name: name.to_string(),
+            utxos: HashMap::new(),
         }
     }
 
@@ -114,23 +118,45 @@ impl Wallet {
             Ok(a) => a,
             Err(_) => return 0,
         };
-        let mut received = 0u64;
+        let tx_hash_hex = |tx: &Transaction| hex::encode(tx.hash());
+
         for tx in &block.transactions {
+            let txh = tx_hash_hex(tx);
             if !self.transactions.contains(&tx.hash()) {
-                for output in &tx.outputs {
-                    if output.stealth_address.spend_pub.0 == my_addr.spend_pub.0 {
-                        received += output.amount;
-                        if !self.transactions.contains(&tx.hash()) {
-                            self.transactions.push(tx.hash());
-                        }
-                    }
+                self.transactions.push(tx.hash());
+            }
+
+            for (i, output) in tx.outputs.iter().enumerate() {
+                if output.stealth_address.spend_pub.0 == my_addr.spend_pub.0 {
+                    let outpoint = OutPoint { tx_hash: tx.hash(), index: i as u32 };
+                    let key = format!("{}:{}", txh, i);
+                    self.utxos.insert(key, (outpoint, output.amount));
+                }
+            }
+
+            for input in &tx.inputs {
+                let in_key = format!("{}:{}", hex::encode(input.outpoint.tx_hash), input.outpoint.index);
+                if self.utxos.remove(&in_key).is_some() {
+                    // spent one of our UTXOs
                 }
             }
         }
-        if received > 0 {
-            self.balance += received;
+
+        self.balance = self.utxos.values().map(|(_, amt)| amt).sum();
+        self.balance
+    }
+
+    pub fn get_utxos_for_amount(&self, needed: u64) -> Vec<(OutPoint, u64)> {
+        let mut selected = Vec::new();
+        let mut total = 0u64;
+        for (_, (outpoint, amount)) in &self.utxos {
+            selected.push((outpoint.clone(), *amount));
+            total += amount;
+            if total >= needed {
+                break;
+            }
         }
-        received
+        selected
     }
 
     pub fn to_json(&self) -> String {

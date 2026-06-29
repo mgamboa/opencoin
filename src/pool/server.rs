@@ -9,7 +9,7 @@ use log::{info, warn, error};
 
 use crate::chain::address::OpenCoinAddress;
 use crate::chain::block::{Block, BlockHeader, calculate_block_reward};
-use crate::chain::transaction::Transaction;
+use crate::chain::transaction::{Transaction, TransactionType};
 use crate::chain::blockchain::Blockchain;
 use crate::crypto::hash::merkle_root;
 use crate::crypto::stealth::StealthAddress;
@@ -39,6 +39,7 @@ pub struct BlockTemplate {
     pub job_id: u64,
     pub header_bytes: Vec<u8>,
     pub coinbase_tx: Transaction,
+    pub mempool_txs: Vec<Transaction>,
 }
 
 pub struct PoolServer {
@@ -98,6 +99,7 @@ impl PoolServer {
         let blockchain = self.blockchain.clone();
         let pool_addr = self.pool_address.clone();
         let job_counter = self.job_counter.clone();
+        let p2p = self.p2p.clone();
 
         let updater = tokio::spawn(async move {
             loop {
@@ -106,7 +108,20 @@ impl PoolServer {
                 let height = bc.state.height + 1;
                 let reward = calculate_block_reward(height, bc.state.premine_remaining);
                 let coinbase_tx = Transaction::coinbase(reward, &pool_addr);
-                let txs = vec![coinbase_tx.clone()];
+                let mut txs = vec![coinbase_tx.clone()];
+                if let Some(ref p) = p2p {
+                    let mempool = p.mempool.read().await;
+                    let mut fee_txs: Vec<&Transaction> = mempool.iter().collect();
+                    fee_txs.sort_by(|a, b| b.fee.cmp(&a.fee));
+                    let max_block_txs = crate::config::MAX_TRANSACTIONS_PER_BLOCK;
+                    for tx in fee_txs.iter().take(max_block_txs) {
+                        if tx.total_output() + tx.fee <= reward.saturating_sub(reward / 10) {
+                            if tx.verify_signatures().is_ok() {
+                                txs.push((*tx).clone());
+                            }
+                        }
+                    }
+                }
                 let tx_hashes: Vec<[u8; 32]> = txs.iter().map(|t| t.hash()).collect();
                 let merkle = merkle_root(&tx_hashes);
 
@@ -134,6 +149,10 @@ impl PoolServer {
 
                 let job_id = job_counter.fetch_add(1, Ordering::SeqCst);
 
+                let mempool_txs: Vec<Transaction> = txs.iter()
+                    .filter(|t| t.tx_type != TransactionType::Coinbase)
+                    .cloned()
+                    .collect();
                 let template = BlockTemplate {
                     height,
                     difficulty,
@@ -142,6 +161,7 @@ impl PoolServer {
                     job_id,
                     header_bytes: header_data,
                     coinbase_tx,
+                    mempool_txs,
                 };
 
                 let mut current = template_updater.write().await;
@@ -312,6 +332,10 @@ impl PoolServer {
                                                 let tx_hashes = vec![coinbase.hash()];
                                                 let merkle = merkle_root(&tx_hashes);
 
+                                                let mut all_txs = vec![coinbase];
+                                                all_txs.extend(t.mempool_txs.clone());
+                                                let all_tx_hashes: Vec<[u8; 32]> = all_txs.iter().map(|t| t.hash()).collect();
+                                                let block_merkle = merkle_root(&all_tx_hashes);
                                                 let block = Block {
                                                     header: BlockHeader {
                                                         version: 1,
@@ -319,12 +343,12 @@ impl PoolServer {
                                                         timestamp: SystemTime::now()
                                                             .duration_since(UNIX_EPOCH).unwrap().as_secs(),
                                                         previous_hash: bc.state.current_hash,
-                                                        merkle_root: merkle,
+                                                        merkle_root: block_merkle,
                                                         difficulty_target: difficulty_to_compact(t.difficulty),
                                                         nonce,
                                                         extra_nonce: 0,
                                                     },
-                                                    transactions: vec![coinbase],
+                                                    transactions: all_txs,
                                                 };
 
                                                 match bc.add_block(block.clone()) {
