@@ -38,6 +38,8 @@ enum Commands {
         #[arg(long)]
         peer: Option<String>,
         #[arg(long)]
+        seed: Vec<String>,
+        #[arg(long)]
         mine: bool,
         #[arg(long)]
         premine_key: Option<String>,
@@ -62,8 +64,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Start { data_dir, p2p_port, rpc_port, peer, mine, premine_key, pool, pool_port, pool_address } => {
-            run_node(&data_dir, p2p_port, rpc_port, peer.as_deref(), mine, premine_key, pool, pool_port, pool_address).await?;
+        Commands::Start { data_dir, p2p_port, rpc_port, peer, seed, mine, premine_key, pool, pool_port, pool_address } => {
+            run_node(&data_dir, p2p_port, rpc_port, peer.as_deref(), &seed, mine, premine_key, pool, pool_port, pool_address).await?;
         }
         Commands::GenerateGenesis { premine_address, output } => {
             generate_genesis(&premine_address, &output)?;
@@ -78,8 +80,9 @@ async fn run_node(
     p2p_port: u16,
     rpc_port: u16,
     peer: Option<&str>,
-    mine: bool,
-    premine_key: Option<String>,
+    seeds: &[String],
+    enable_mining: bool,
+    premine_key_hex: Option<String>,
     enable_pool: bool,
     pool_port: u16,
     pool_address: Option<String>,
@@ -89,7 +92,7 @@ async fn run_node(
     info!("OpenCoin Node starting...");
     info!("Data directory: {}", expanded_dir);
 
-    let premine_kp = match premine_key {
+    let premine_kp = match premine_key_hex {
         Some(key_hex) => {
             let key_bytes = hex::decode(&key_hex)?;
             let secret = SecretKey::from_bytes(&key_bytes)?;
@@ -164,28 +167,35 @@ async fn run_node(
         None
     };
 
-    if let Some(peer_addr) = peer {
-        let peer_str = peer_addr.to_string();
-        info!("Connecting to peer: {}", peer_str);
-        let addr: std::net::SocketAddr = peer_addr.parse()?;
-        let p2p_clone = p2p.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-            if let Err(e) = p2p_clone.connect_to_peer(addr).await {
-                warn!("Failed to connect to peer {}: {}", peer_str, e);
-                return;
+    let seed_list: Vec<String> = {
+        let mut s: Vec<String> = seeds.to_vec();
+        if let Some(peer_addr) = peer {
+            s.push(peer_addr.to_string());
+        }
+        s
+    };
+    let p2p_clone = p2p.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        for seed_str in &seed_list {
+            info!("Connecting to seed peer: {}", seed_str);
+            if let Ok(addr) = seed_str.parse::<std::net::SocketAddr>() {
+                if let Err(e) = p2p_clone.connect_to_peer(addr).await {
+                    warn!("Failed to connect to seed {}: {}", seed_str, e);
+                } else {
+                    p2p_clone.send_to(&addr, &opencoin::p2p::Message::GetBlocks(0)).await;
+                    p2p_clone.send_to(&addr, &opencoin::p2p::Message::GetPeers).await;
+                    info!("Connected to seed {}, requesting blocks & peers", seed_str);
+                }
             }
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            p2p_clone.send_to(&addr, &opencoin::p2p::Message::GetBlocks(0)).await;
-            info!("Sent GetBlocks request to {}", peer_str);
-        });
-    }
+        }
+    });
 
     let bc_for_mining = blockchain.clone();
     let w_for_mining = wallet.clone();
     let p2p_for_mining = p2p.clone();
 
-    if mine {
+    if enable_mining {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;

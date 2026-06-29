@@ -10,6 +10,8 @@ use crate::chain::block::Block;
 use crate::chain::transaction::Transaction;
 use crate::chain::blockchain::Blockchain;
 
+type PeerMap = HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
     Ping(u64),
@@ -47,10 +49,36 @@ impl P2PNetwork {
         let listener = TcpListener::bind(self.our_address).await?;
         info!("P2P server listening on {}", self.our_address);
 
+        let known_peers = self.known_peers.clone();
+        let peers = self.peers.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                let known = known_peers.read().await;
+                let peer_addrs: Vec<SocketAddr> = known.iter().cloned().collect();
+                drop(known);
+                for peer_addr in peer_addrs {
+                    let p = peers.read().await;
+                    if let Some(tx) = p.get(&peer_addr) {
+                        let msg = bincode::serialize(&Message::GetPeers).unwrap_or_default();
+                        let data = encode_length_prefixed(&msg);
+                        let _ = tx.send(data);
+                    }
+                }
+                info!("Peer discovery: requested peers from connected nodes");
+            }
+        });
+
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     info!("New peer connected: {}", addr);
+                    {
+                        let mut known = self.known_peers.write().await;
+                        if !known.contains(&addr) {
+                            known.push(addr);
+                        }
+                    }
                     self.spawn_peer(stream, addr).await;
                 }
                 Err(e) => {
@@ -60,7 +88,7 @@ impl P2PNetwork {
         }
     }
 
-    pub async fn connect_to_peer(&self, addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn connect_to_peer(&self, addr: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if self.peers.read().await.contains_key(&addr) {
             return Ok(());
         }
@@ -68,6 +96,14 @@ impl P2PNetwork {
         info!("Connected to peer: {}", addr);
         self.spawn_peer(stream, addr).await;
         self.send_to(&addr, &Message::Ping(crate::PROTOCOL_VERSION as u64)).await;
+
+        {
+            let mut known = self.known_peers.write().await;
+            if !known.contains(&addr) {
+                known.push(addr);
+            }
+        }
+
         Ok(())
     }
 
@@ -80,8 +116,7 @@ impl P2PNetwork {
             peers.insert(addr, tx);
         }
 
-        let peers = self.peers.clone();
-        let blockchain = self.blockchain.clone();
+        let peers_writer = self.peers.clone();
 
         tokio::spawn(async move {
             use tokio::io::AsyncWriteExt;
@@ -95,17 +130,14 @@ impl P2PNetwork {
                     None => break,
                 }
             }
-            let mut p = peers.write().await;
+            let mut p = peers_writer.write().await;
             p.remove(&addr);
             info!("Peer {} write task ended", addr);
         });
 
-        let peers = self.peers.clone();
+        let peers_clone = self.peers.clone();
         let blockchain = self.blockchain.clone();
-        let our_address = self.our_address;
-
-        let peers2 = self.peers.clone();
-        let blockchain2 = self.blockchain.clone();
+        let known_peers = self.known_peers.clone();
         let our_addr = self.our_address;
 
         tokio::spawn(async move {
@@ -115,9 +147,8 @@ impl P2PNetwork {
                 let result = read_message_inner(&mut read_half).await;
                 match result {
                     Ok(Some(msg)) => {
-                        let guard = peers.read().await;
-                        handle_message(msg, &addr, &guard, &blockchain, &our_address).await;
-                        drop(guard);
+                        let peers_snapshot = peers_clone.read().await.clone();
+                        handle_message2(msg, &addr, peers_snapshot, &blockchain, &known_peers, our_addr).await;
                     }
                     Ok(None) => {
                         info!("Peer {} disconnected", addr);
@@ -129,7 +160,7 @@ impl P2PNetwork {
                     }
                 }
             }
-            let mut p = peers.write().await;
+            let mut p = peers_clone.write().await;
             p.remove(&addr);
             info!("Peer {} read task ended", addr);
         });
@@ -198,12 +229,13 @@ where
     Ok(Some(msg))
 }
 
-async fn handle_message(
+async fn handle_message2(
     msg: Message,
     addr: &SocketAddr,
-    peers: &HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>,
+    peers: HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>,
     blockchain: &Arc<RwLock<Blockchain>>,
-    our_address: &SocketAddr,
+    known_peers: &Arc<RwLock<Vec<SocketAddr>>>,
+    our_address: SocketAddr,
 ) {
     match msg {
         Message::Ping(version) => {
@@ -257,16 +289,32 @@ async fn handle_message(
             }
         }
         Message::GetPeers => {
-            let known = vec![*our_address];
+            let known = known_peers.read().await;
+            let peer_addrs: Vec<SocketAddr> = known
+                .iter()
+                .filter(|p| *p != addr && !peers.contains_key(p))
+                .take(10)
+                .cloned()
+                .collect();
+            drop(known);
+
             if let Some(tx) = peers.get(addr) {
-                let resp = bincode::serialize(&Message::Peers(known)).unwrap();
+                let resp = bincode::serialize(&Message::Peers(peer_addrs)).unwrap();
                 let _ = tx.send(encode_length_prefixed(&resp));
             }
         }
-        Message::Peers(_) => {}
-        Message::MempoolRequest => {
-            // no-op for now
+        Message::Peers(peer_list) => {
+            let count = peer_list.len();
+            for paddr in peer_list {
+                if paddr == our_address { continue; }
+                let mut known = known_peers.write().await;
+                if !known.contains(&paddr) {
+                    known.push(paddr);
+                }
+            }
+            info!("Discovered {} peers from {}", count, addr);
         }
+        Message::MempoolRequest => {}
         Message::MempoolResponse(_) => {}
         Message::Transaction(tx) => {
             info!("Received transaction from {}: {}", addr, hex::encode(tx.hash()));
