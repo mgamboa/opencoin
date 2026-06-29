@@ -172,7 +172,7 @@ opencoin-node start --seed mail.laat.com.au:9768
 opencoin-node start --seed mail.laat.com.au:9768 --mine --premine-key YOUR-SECRET-KEY
 
 # Connect miner to pool:
-opencoin-miner --pool 192.168.2.10:3333 --address YOUR-OC-ADDRESS
+opencoin-miner --pool mail.laat.com.au:3333 --address YOUR-OC-ADDRESS
 
 # Create a wallet:
 opencoin-wallet create --name my-wallet</pre>
@@ -181,7 +181,7 @@ opencoin-wallet create --name my-wallet</pre>
 <table>
 <tr><td>P2P</td><td><code>mail.laat.com.au:9768</code></td></tr>
 <tr><td>RPC (Web)</td><td><code>http://mail.laat.com.au:9769</code></td></tr>
-<tr><td>Pool</td><td><code>192.168.2.10:3333</code></td></tr>
+<tr><td>Pool</td><td><code>mail.laat.com.au:3333</code></td></tr>
 </table>
 </div>
 "##;
