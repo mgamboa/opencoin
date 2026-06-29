@@ -221,6 +221,7 @@ curl -s http://localhost:9769/ -d '{"method":"getaddress","params":[],"id":1}'
 | `getbalance` | none | balance, locked, address |
 | `getaddress` | none | wallet address |
 | `getpoolstats` | none | pool miners, shares, current job |
+| `sendtoaddress` | [address, amount, fee?] | tx_hash, amount, fee, change |
 
 ## Network
 
@@ -315,6 +316,16 @@ MIT
 - [x] Mining pool server
 - [x] Web wallet + pool dashboard
 - [x] Block persistence (save/load chain from disk)
+- [x] Wallet persistence (balance survives restarts)
+- [x] P2P block sync + peer discovery
+- [x] Wallet-to-wallet transfers (sendtoaddress RPC)
+- [x] Transaction signing (ed25519 signatures)
+- [x] UTXO tracking (balance derived from unspent outputs)
+- [x] Mempool in blocks (pending txs included in mined blocks)
+- [x] Difficulty adjustment (median-based retargeting)
+- [x] Fee market (higher-fee txs prioritized)
+- [x] Chain reorg handling
+- [x] Block explorer with tx details
 - [ ] WASM smart contracts
 - [ ] RingCT (confidential transactions)
 - [ ] Mobile wallet
