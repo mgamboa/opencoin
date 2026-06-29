@@ -50,18 +50,22 @@ Pool operators run a pool server that:
 
 **Pool server is built into the node.** Start with `--pool` flag.
 
-### Live Public Network
+### Decentralized Discovery
 
-| Service | Address | Port |
-|---------|---------|------|
-| P2P Seed | `mail.laat.com.au` | 9768 |
-| RPC / Web | `http://mail.laat.com.au:9769` | 9769 |
-| **Pool** | **`mail.laat.com.au`** | **3333** |
+New nodes find the network through a **bootstrap peer list** in the git repository:
 
-Miners connect to the pool with:
 ```bash
-opencoin-miner --pool mail.laat.com.au:3333 --address YOUR-OC-ADDRESS --threads 4
+# peers.json contains known public nodes
+cat peers.json
+
+# The miner can auto-discover a live pool from this list:
+opencoin-miner --discover --address YOUR-OC-ADDRESS --threads 4
+
+# Or connect to a specific pool:
+opencoin-miner --pool any-public-node:3333 --address YOUR-OC-ADDRESS --threads 4
 ```
+
+As the network grows, the peer list expands. Submit a PR to add your public node to `peers.json`.
 
 ## Prerequisites
 
@@ -269,17 +273,23 @@ git clone https://github.com/mgamboa/opencoin.git
 cd opencoin
 cargo build --release
 
-# 4. Run a node:
-./target/release/opencoin-node start --seed mail.laat.com.au:9768
+# 4. Run a node (discovers peers from peers.json automatically):
+./target/release/opencoin-node start
 
-# Or run a mining node with your wallet:
-./target/release/opencoin-node start --seed mail.laat.com.au:9768 --mine --premine-key YOUR-SECRET-KEY
+# Or connect to a specific seed node:
+./target/release/opencoin-node start --seed any-public-node:9768
 
-# Or run a pool server:
-./target/release/opencoin-node start --seed mail.laat.com.au:9768 --pool --pool-port 3333 --premine-key YOUR-SECRET-KEY
+# Run a mining node with your wallet:
+./target/release/opencoin-node start --mine --premine-key YOUR-SECRET-KEY
 
-# Connect a miner to the pool:
-./target/release/opencoin-miner --pool mail.laat.com.au:3333 --address YOUR-OC-ADDRESS --threads 4
+# Run a pool server:
+./target/release/opencoin-node start --pool --pool-port 3333
+
+# Connect a miner to the pool (auto-discover from peers.json):
+./target/release/opencoin-miner --discover --address YOUR-OC-ADDRESS --threads 4
+
+# Or connect to a specific pool:
+./target/release/opencoin-miner --pool pool-host:3333 --address YOUR-OC-ADDRESS --threads 4
 ```
 
 ## Wallet Management
@@ -306,7 +316,7 @@ cargo build --release
 
 ```bash
 # Recover your wallet by starting a node with your secret key:
-./target/release/opencoin-node start --seed mail.laat.com.au:9768 --premine-key YOUR-64-BYTE-HEX-SECRET-KEY
+./target/release/opencoin-node start --premine-key YOUR-64-BYTE-HEX-SECRET-KEY
 
 # Your balance, address, and transaction history will be restored.
 # The blockchain is synced from the network; your coins are on-chain.

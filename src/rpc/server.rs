@@ -179,11 +179,29 @@ opencoin-node start --seed mail.laat.com.au:9768
 # Start a mining node (earns block rewards):
 opencoin-node start --seed mail.laat.com.au:9768 --mine --premine-key YOUR-SECRET-KEY
 
-# Connect miner to pool:
-opencoin-miner --pool mail.laat.com.au:3333 --address YOUR-OC-ADDRESS
+# Connect miner to a specific pool:
+opencoin-miner --pool any-public-node:3333 --address YOUR-OC-ADDRESS --threads 4
+
+# Or discover a live pool automatically from peers.json:
+opencoin-miner --discover --address YOUR-OC-ADDRESS --threads 4
+
+# Or auto-discover a live pool from peers.json:
+opencoin-miner --discover --address YOUR-OC-ADDRESS --threads 4
 
 # Create a wallet:
 opencoin-wallet create --name my-wallet</pre>
+</div>
+<div class=card><h3>Create a Wallet</h3>
+<pre># Generate a new wallet:
+opencoin-wallet create --name my-wallet
+# Output: Address, Public key, Secret key
+
+# View your wallet:
+opencoin-wallet show --name my-wallet
+
+# Generate just a keypair (for --premine-key or --pool-address):
+opencoin-wallet generate-key</pre>
+<p>Your wallet address looks like: <code style="font-size:11px">OC2141d609ed887915acc59ceacdd3f6ca7ff9b8a480ea1597bcb1a3d0fb3e6ea4ba6622fb</code></p>
 </div>
 <div class=card><h3>Wallet Recovery</h3>
 <p>Your wallet <strong>IS your secret key</strong>. Lose the machine, not the key.</p>
@@ -199,10 +217,11 @@ opencoin-wallet generate-key</pre>
 </div>
 <div class=card><h3>Seed Node</h3>
 <table>
-<tr><td>P2P</td><td><code>mail.laat.com.au:9768</code></td></tr>
-<tr><td>RPC (Web)</td><td><code>http://mail.laat.com.au:9769</code></td></tr>
-<tr><td>Pool</td><td><code>mail.laat.com.au:3333</code></td></tr>
+<tr><td>P2P</td><td><code>any-public-node:9768</code></td></tr>
+<tr><td>RPC (Web)</td><td><code>http://any-public-node:9769</code></td></tr>
+<tr><td>Pool</td><td><code>any-public-node:3333</code></td></tr>
 </table>
+<p>See <code>peers.json</code> in the repo for live public nodes.</p>
 </div>
 "##;
 

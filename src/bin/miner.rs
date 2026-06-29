@@ -10,20 +10,66 @@ use tokio::sync::mpsc;
 #[command(name = "opencoin-miner")]
 #[command(about = "OpenCoin CPU miner (connects to pool)")]
 struct Cli {
-    #[arg(short, long, default_value = "127.0.0.1:3333")]
-    pool: String,
+    #[arg(short, long)]
+    pool: Option<String>,
     #[arg(short, long, default_value_t = 1)]
     threads: u32,
     #[arg(short, long)]
-    address: String,
+    address: Option<String>,
+    #[arg(long)]
+    discover: bool,
+    #[arg(long, default_value = "peers.json")]
+    peers: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     println!("OpenCoin Miner starting...");
-    println!("Pool: {}", cli.pool);
+
+    let pool_addr = if cli.discover {
+        let peers_content = tokio::fs::read_to_string(&cli.peers).await
+            .unwrap_or_else(|_| "[]".to_string());
+        let peers: Vec<String> = serde_json::from_str(&peers_content).unwrap_or_default();
+        if peers.is_empty() {
+            return Err("No peers in peers.json for discovery".into());
+        }
+        let mut found = None;
+        for peer in &peers {
+            let pool_host = if peer.contains(':') {
+                let parts: Vec<&str> = peer.split(':').collect();
+                format!("{}:3333", parts[0])
+            } else {
+                format!("{}:3333", peer)
+            };
+            println!("Probing pool at {}...", pool_host);
+            match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&pool_host)).await {
+                Ok(Ok(_)) => {
+                    println!("Found live pool at {}", pool_host);
+                    found = Some(pool_host);
+                    break;
+                }
+                _ => println!("{} not responding", pool_host),
+            }
+        }
+        found.ok_or("No live pools found")?
+    } else {
+        cli.pool.clone().unwrap_or_else(|| "127.0.0.1:3333".to_string())
+    };
+
+    let miner_address = if let Some(ref addr) = cli.address {
+        addr.clone()
+    } else {
+        let kp = opencoin::crypto::keys::generate_keypair();
+        let addr = opencoin::crypto::keys::public_key_to_address(&kp.public);
+        println!("Generated new wallet address: {}", addr);
+        println!("Secret key: {} (SAVE THIS!)", hex::encode(kp.secret.0));
+        addr
+    };
+
+    println!("Pool: {}", pool_addr);
     println!("Threads: {}", cli.threads);
+    println!("Address: {}", miner_address);
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -32,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\nMiner stopping...");
     })?;
 
-    let stream = TcpStream::connect(&cli.pool).await?;
+    let stream = TcpStream::connect(&pool_addr).await?;
     println!("Connected to pool");
 
     let (read_half, mut write_half) = tokio::io::split(stream);
@@ -92,8 +138,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
-
-    let miner_address = cli.address.clone();
 
     for thread_id in 0..cli.threads {
         let job_ref = current_job.clone();
