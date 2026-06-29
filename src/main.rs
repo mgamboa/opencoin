@@ -309,16 +309,8 @@ async fn run_node(
     Ok(())
 }
 
-fn generate_genesis(premine_address: &str, output: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let pub_bytes = hex::decode(premine_address)?;
-    let public_key = PublicKey::from_bytes(&pub_bytes)?;
-    let stealth = StealthAddress {
-        spend_pub: public_key.clone(),
-        view_pub: public_key,
-    };
-    let coinbase = Transaction::coinbase(config::PREMINE_AMOUNT, &stealth);
-    let genesis = Block::genesis(coinbase);
-
+fn generate_genesis(_premine_address: &str, output: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let genesis = Block::genesis();
     let json = serde_json::to_string_pretty(&genesis)?;
     std::fs::write(output, json)?;
     info!("Genesis block written to {}", output);

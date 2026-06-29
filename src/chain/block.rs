@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
-use super::transaction::Transaction;
+use super::transaction::{Transaction, TransactionType, TxOutput};
+use crate::crypto::keys::PublicKey;
+use crate::crypto::stealth::{StealthAddress, OneTimeOutput, EphemeralPublicKey, KeyImage};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockHeader {
@@ -20,14 +22,38 @@ pub struct Block {
 }
 
 impl Block {
-    pub fn genesis(coinbase_tx: Transaction) -> Self {
+    pub fn genesis() -> Self {
+        let null_stealth = StealthAddress {
+            spend_pub: PublicKey([0u8; 32]),
+            view_pub: PublicKey([0u8; 32]),
+        };
+        let coinbase_tx = Transaction {
+            version: 1,
+            tx_type: TransactionType::Coinbase,
+            inputs: Vec::new(),
+            outputs: vec![TxOutput {
+                stealth_address: null_stealth,
+                one_time_output: OneTimeOutput {
+                    ephemeral_pub: EphemeralPublicKey(PublicKey([0u8; 32])),
+                    key_image: KeyImage([0u8; 32]),
+                    amount_commitment: [0u8; 32],
+                },
+                amount: 0,
+                view_key_proof: None,
+            }],
+            fee: 0,
+            timestamp: 0,
+            signatures: Vec::new(),
+            memo: Some(String::from("Genesis")),
+        };
+        let merkle = crate::crypto::hash::merkle_root(&[coinbase_tx.hash()]);
         Block {
             header: BlockHeader {
                 version: 1,
                 height: 0,
                 timestamp: 1700000000,
                 previous_hash: [0u8; 32],
-                merkle_root: [0u8; 32],
+                merkle_root: merkle,
                 difficulty_target: 0x1e00ffff,
                 nonce: 0,
                 extra_nonce: 0,

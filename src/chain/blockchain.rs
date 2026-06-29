@@ -29,9 +29,7 @@ pub struct Blockchain {
 
 impl Blockchain {
     pub fn new(premine_address: StealthAddress) -> Self {
-        let genesis_tx = Transaction::coinbase(0, &premine_address);
-        let mut genesis = Block::genesis(genesis_tx.clone());
-        genesis.header.merkle_root = merkle_root(&[genesis_tx.hash()]);
+        let genesis = Block::genesis();
 
         let mut bc = Blockchain {
             blocks: vec![genesis],
@@ -75,10 +73,7 @@ impl Blockchain {
         blocks.sort_by_key(|b| b.header.height);
         let has_genesis = blocks.first().map_or(false, |b| b.header.height == 0);
         if !has_genesis {
-            let genesis_tx = Transaction::coinbase(0, &premine_address);
-            let mut genesis = Block::genesis(genesis_tx.clone());
-            genesis.header.merkle_root = merkle_root(&[genesis_tx.hash()]);
-            blocks.insert(0, genesis);
+            blocks.insert(0, Block::genesis());
         }
         let mut utxo_set = HashMap::new();
         for block in &blocks {
