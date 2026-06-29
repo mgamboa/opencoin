@@ -333,11 +333,24 @@ async fn blocks_html(blockchain: &Arc<RwLock<Blockchain>>) -> String {
         if let Some(block) = bc.get_block(h) {
             let hash = hex::encode(block.hash());
             let short_hash = &hash[..16];
+            let (reward, recipient) = block.transactions.first()
+                .map(|tx| {
+                    let total: u64 = tx.outputs.iter().map(|o| o.amount).sum();
+                    let addr = tx.outputs.first()
+                        .map(|o| {
+                            let hex_addr = hex::encode(&o.stealth_address.spend_pub.0[..8]);
+                            format!("{}...", hex_addr)
+                        })
+                        .unwrap_or_default();
+                    (total, addr)
+                })
+                .unwrap_or((0, String::new()));
             rows.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
                 h,
                 short_hash,
-                block.transactions.len(),
+                reward,
+                recipient,
                 block.header.timestamp,
             ));
         }
@@ -345,7 +358,7 @@ async fn blocks_html(blockchain: &Arc<RwLock<Blockchain>>) -> String {
     format!(
         r##"<div class=card><h2>Recent Blocks (last 20)</h2>
 <table>
-<tr><th>Height</th><th>Hash</th><th>TXs</th><th>Timestamp</th></tr>
+<tr><th>Height</th><th>Hash</th><th>Reward</th><th>Miner</th><th>Timestamp</th></tr>
 {rows}</table></div>"##
     )
 }
