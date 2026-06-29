@@ -8,7 +8,7 @@ use opencoin::chain::blockchain::Blockchain;
 use opencoin::chain::block::Block;
 use opencoin::chain::transaction::{Transaction, TransactionType};
 use opencoin::consensus::pow::{mine_block, calculate_target};
-use opencoin::consensus::difficulty::{calculate_difficulty, difficulty_to_target};
+use opencoin::consensus::difficulty::{calculate_difficulty, difficulty_to_compact};
 use opencoin::crypto::hash::merkle_root;
 use opencoin::crypto::stealth::StealthAddress;
 use opencoin::crypto::keys::{PublicKey, KeyPair, SecretKey};
@@ -139,7 +139,7 @@ async fn run_node(
                 let merkle = merkle_root(&tx_hashes);
 
                 let difficulty = calculate_difficulty(&bc.blocks);
-                let target = difficulty_to_target(difficulty);
+                let compact_target = difficulty_to_compact(difficulty);
 
                 let mut block = Block {
                     header: opencoin::chain::block::BlockHeader {
@@ -151,7 +151,7 @@ async fn run_node(
                             .as_secs(),
                         previous_hash: bc.state.current_hash,
                         merkle_root: merkle,
-                        difficulty_target: target,
+                        difficulty_target: compact_target,
                         nonce: 0,
                         extra_nonce: 0,
                     },

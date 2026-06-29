@@ -7,7 +7,7 @@ use opencoin::config;
 use opencoin::chain::block::Block;
 use opencoin::chain::transaction::{Transaction, TransactionType};
 use opencoin::consensus::pow::{mine_block, calculate_target};
-use opencoin::consensus::difficulty::{calculate_difficulty, difficulty_to_target};
+use opencoin::consensus::difficulty::{calculate_difficulty, difficulty_to_compact};
 use opencoin::crypto::hash::merkle_root;
 use opencoin::crypto::keys::{PublicKey, SecretKey, KeyPair};
 use opencoin::crypto::stealth::StealthAddress;

@@ -63,7 +63,7 @@ impl Blockchain {
             return Err("Invalid previous hash");
         }
 
-        let target = u64::MAX >> block.header.difficulty_target;
+        let target = crate::consensus::difficulty::compact_to_target(block.header.difficulty_target);
         if !check_pow(&block, target) {
             return Err("Block does not meet difficulty target");
         }

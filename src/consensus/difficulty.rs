@@ -25,13 +25,7 @@ pub fn calculate_difficulty(blocks: &[Block]) -> u64 {
 
     let mut difficulty: u64 = 1;
     for block in window_blocks {
-        let compact = block.header.difficulty_target as u64;
-        let exponent = compact >> 24;
-        let mantissa = compact & 0x00ffffff;
-        if exponent <= 3 {
-            continue;
-        }
-        let block_diff = (0x0000ffffu64 << (exponent - 3) * 8).saturating_div(mantissa | 0x008000);
+        let block_diff = compact_to_difficulty(block.header.difficulty_target);
         difficulty = difficulty.saturating_add(block_diff);
     }
     difficulty = difficulty / (window_blocks.len() as u64);
@@ -43,25 +37,34 @@ pub fn calculate_difficulty(blocks: &[Block]) -> u64 {
     (difficulty as f64 * adjustment) as u64
 }
 
-pub fn difficulty_to_target(difficulty: u64) -> u32 {
+pub fn difficulty_to_compact(difficulty: u64) -> u32 {
     if difficulty == 0 {
         return 0x1e00ffff;
     }
     let target = u64::MAX / difficulty;
-    let target_bytes = target.to_be_bytes();
-    let leading_zeros = target_bytes.iter().take_while(|&&b| b == 0).count();
-    if leading_zeros >= 32 {
+    if target == 0 {
         return 0x1e00ffff;
     }
-    let mut compact = ((leading_zeros as u32 + 1) << 24);
-    if leading_zeros < 32 {
-        compact |= (target_bytes[leading_zeros] as u32) << 16;
+    let leading_zeros = target.leading_zeros() as u32;
+    let exponent = (31 - leading_zeros) + 1;
+    let mantissa = target >> (exponent - 3) * 8;
+    (exponent << 24) | (mantissa as u32 & 0x00ffffff)
+}
+
+pub fn compact_to_target(compact: u32) -> u64 {
+    let exponent = compact >> 24;
+    let mantissa = compact & 0x00ffffff;
+    if exponent <= 3 {
+        mantissa as u64 >> (3 - exponent) * 8
+    } else {
+        (mantissa as u64) << ((exponent - 3) * 8)
     }
-    if leading_zeros + 1 < 32 {
-        compact |= (target_bytes[leading_zeros + 1] as u32) << 8;
+}
+
+fn compact_to_difficulty(compact: u32) -> u64 {
+    let target = compact_to_target(compact);
+    if target == 0 {
+        return u64::MAX;
     }
-    if leading_zeros + 2 < 32 {
-        compact |= target_bytes[leading_zeros + 2] as u32;
-    }
-    compact
+    u64::MAX / target
 }
