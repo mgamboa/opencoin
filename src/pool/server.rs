@@ -17,6 +17,7 @@ use crate::consensus::difficulty::{calculate_difficulty, difficulty_to_compact};
 use crate::consensus::pow::{calculate_target, check_pow};
 use crate::p2p::P2PNetwork;
 use crate::wallet::Wallet;
+use crate::storage::db::Storage;
 
 pub const POOL_FEE_PERCENT: u64 = 2;
 
@@ -46,6 +47,7 @@ pub struct PoolServer {
     pub blockchain: Arc<RwLock<Blockchain>>,
     pub p2p: Option<Arc<P2PNetwork>>,
     pub wallet: Option<Arc<RwLock<Option<Wallet>>>>,
+    pub storage: Option<Arc<std::sync::Mutex<Storage>>>,
     pub miners: Arc<RwLock<HashMap<SocketAddr, MinerInfo>>>,
     pub current_template: Arc<RwLock<Option<BlockTemplate>>>,
     pub job_counter: Arc<AtomicU64>,
@@ -62,6 +64,7 @@ impl PoolServer {
             blockchain,
             p2p: None,
             wallet: None,
+            storage: None,
             miners: Arc::new(RwLock::new(HashMap::new())),
             current_template: Arc::new(RwLock::new(None)),
             job_counter: Arc::new(AtomicU64::new(1)),
@@ -78,6 +81,11 @@ impl PoolServer {
 
     pub fn with_wallet(mut self, wallet: Arc<RwLock<Option<Wallet>>>) -> Self {
         self.wallet = Some(wallet);
+        self
+    }
+
+    pub fn with_storage(mut self, storage: Arc<std::sync::Mutex<Storage>>) -> Self {
+        self.storage = Some(storage);
         self
     }
 
@@ -208,6 +216,7 @@ impl PoolServer {
         let round_shares = self.round_shares.clone();
         let p2p = p2p.clone();
         let wallet = self.wallet.clone();
+        let storage = self.storage.clone();
 
         tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
@@ -330,7 +339,13 @@ impl PoolServer {
                                                         if let Some(ref w) = wallet {
                                                             let mut wallet_lock = w.write().await;
                                                             if let Some(ref mut wlt) = *wallet_lock {
-                                                                wlt.scan_block(&block);
+                                                                if wlt.scan_block(&block) > 0 {
+                                                                    if let Some(ref st) = storage {
+                                                                        if let Ok(s) = st.lock() {
+                                                                            let _ = s.save_wallet(wlt);
+                                                                        }
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                         let mut m = miners.write().await;

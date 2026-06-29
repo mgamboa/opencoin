@@ -152,12 +152,32 @@ async fn run_node(
     }
 
     let wallet = Arc::new(RwLock::new(Some({
-        let mut w = Wallet::from_keypair(premine_kp, "premine");
-        w.balance = config::PREMINE_AMOUNT;
-        w.transactions.push([0u8; 32]);
-        w
+        if let Some(ref storage) = storage {
+            let s = storage.lock().unwrap();
+            if let Ok(Some(saved_wallet)) = s.load_wallet() {
+                info!("Loaded wallet from storage: balance={}, txs={}", saved_wallet.balance, saved_wallet.transactions.len());
+                saved_wallet
+            } else {
+                let mut w = Wallet::from_keypair(premine_kp, "premine");
+                w.balance = config::PREMINE_AMOUNT;
+                w.transactions.push([0u8; 32]);
+                let _ = s.save_wallet(&w);
+                w
+            }
+        } else {
+            let mut w = Wallet::from_keypair(premine_kp, "premine");
+            w.balance = config::PREMINE_AMOUNT;
+            w.transactions.push([0u8; 32]);
+            w
+        }
     })));
-    let p2p = Arc::new(P2PNetwork::new(p2p_port, blockchain.clone()).with_wallet(wallet.clone()));
+    let p2p = {
+        let mut p = P2PNetwork::new(p2p_port, blockchain.clone()).with_wallet(wallet.clone());
+        if let Some(ref storage) = storage {
+            p = p.with_storage(storage.clone());
+        }
+        Arc::new(p)
+    };
 
     let pool_server: Option<Arc<PoolServer>> = if enable_pool {
         let pool_addr_stealth = match pool_address {
@@ -181,7 +201,10 @@ async fn run_node(
                 }
             }
         };
-        let pool = PoolServer::new(pool_port, pool_addr_stealth, blockchain.clone()).with_p2p(p2p.clone()).with_wallet(wallet.clone());
+        let mut pool = PoolServer::new(pool_port, pool_addr_stealth, blockchain.clone()).with_p2p(p2p.clone()).with_wallet(wallet.clone());
+        if let Some(ref storage) = storage {
+            pool = pool.with_storage(storage.clone());
+        }
         let pool_arc = Arc::new(pool);
         info!("Pool server configured on port {}", pool_port);
         Some(pool_arc)

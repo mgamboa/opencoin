@@ -10,6 +10,7 @@ use crate::chain::block::Block;
 use crate::chain::transaction::Transaction;
 use crate::chain::blockchain::Blockchain;
 use crate::wallet::Wallet;
+use crate::storage::db::Storage;
 
 type PeerMap = HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>;
 
@@ -34,6 +35,7 @@ pub struct P2PNetwork {
     pub known_peers: Arc<RwLock<Vec<SocketAddr>>>,
     pub blockchain: Arc<RwLock<Blockchain>>,
     pub wallet: Option<Arc<RwLock<Option<Wallet>>>>,
+    pub storage: Option<Arc<std::sync::Mutex<Storage>>>,
 }
 
 impl P2PNetwork {
@@ -45,11 +47,17 @@ impl P2PNetwork {
             known_peers: Arc::new(RwLock::new(Vec::new())),
             blockchain,
             wallet: None,
+            storage: None,
         }
     }
 
     pub fn with_wallet(mut self, wallet: Arc<RwLock<Option<Wallet>>>) -> Self {
         self.wallet = Some(wallet);
+        self
+    }
+
+    pub fn with_storage(mut self, storage: Arc<std::sync::Mutex<Storage>>) -> Self {
+        self.storage = Some(storage);
         self
     }
 
@@ -148,6 +156,7 @@ impl P2PNetwork {
         let known_peers = self.known_peers.clone();
         let mempool = self.mempool.clone();
         let wallet = self.wallet.clone();
+        let storage = self.storage.clone();
         let our_addr = self.our_address;
 
         tokio::spawn(async move {
@@ -158,7 +167,7 @@ impl P2PNetwork {
                 match result {
                     Ok(Some(msg)) => {
                         let peers_snapshot = peers_clone.read().await.clone();
-                        handle_message2(msg, &addr, peers_snapshot, &blockchain, &known_peers, &mempool, &wallet, our_addr).await;
+                        handle_message2(msg, &addr, peers_snapshot, &blockchain, &known_peers, &mempool, &wallet, &storage, our_addr).await;
                     }
                     Ok(None) => {
                         info!("Peer {} disconnected", addr);
@@ -247,6 +256,7 @@ async fn handle_message2(
     known_peers: &Arc<RwLock<Vec<SocketAddr>>>,
     mempool: &Arc<RwLock<Vec<Transaction>>>,
     wallet: &Option<Arc<RwLock<Option<Wallet>>>>,
+    storage: &Option<Arc<std::sync::Mutex<Storage>>>,
     our_address: SocketAddr,
 ) {
     match msg {
@@ -273,7 +283,13 @@ async fn handle_message2(
                         if let Some(ref w) = wallet {
                             let mut wallet_lock = w.write().await;
                             if let Some(ref mut wlt) = *wallet_lock {
-                                wlt.scan_block(&b);
+                                if wlt.scan_block(&b) > 0 {
+                                    if let Some(ref st) = storage {
+                                        if let Ok(s) = st.lock() {
+                                            let _ = s.save_wallet(wlt);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -311,7 +327,13 @@ async fn handle_message2(
                     if let Some(ref w) = wallet {
                         let mut wallet_lock = w.write().await;
                         if let Some(ref mut wlt) = *wallet_lock {
-                            wlt.scan_block(&block);
+                            if wlt.scan_block(&block) > 0 {
+                                if let Some(ref st) = storage {
+                                    if let Ok(s) = st.lock() {
+                                        let _ = s.save_wallet(wlt);
+                                    }
+                                }
+                            }
                         }
                     }
                     bc = blockchain.write().await;

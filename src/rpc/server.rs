@@ -516,9 +516,18 @@ async fn handle_rpc_request(
                             wallet.balance = wallet.balance.saturating_sub(amount + fee);
                             wallet.transactions.push(tx_hash);
                         }
-                        drop(w);
+                    drop(w);
 
-                        p2p.broadcast_transaction(&tx).await;
+                    if let Some(ref st) = storage {
+                        let mut w = wallet.write().await;
+                        if let Some(ref wlt) = *w {
+                            if let Ok(s) = st.lock() {
+                                let _ = s.save_wallet(wlt);
+                            }
+                        }
+                    }
+
+                    p2p.broadcast_transaction(&tx).await;
                         let _ = p2p.add_to_mempool(tx.clone()).await;
 
                         if let Some(ref st) = storage {

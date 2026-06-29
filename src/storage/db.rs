@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::chain::block::Block;
 use crate::chain::transaction::Transaction;
 use crate::chain::blockchain::BlockchainState;
+use crate::wallet::Wallet;
 
 pub struct Storage {
     db: Db,
@@ -103,6 +104,22 @@ impl Storage {
 
     pub fn get_all_blocks(&self) -> Result<Vec<Block>, Box<dyn std::error::Error>> {
         self.get_blocks_since(0)
+    }
+
+    pub fn save_wallet(&self, wallet: &Wallet) -> Result<(), Box<dyn std::error::Error>> {
+        let value = bincode::serialize(wallet)?;
+        self.db.insert(b"wallet", value)?;
+        Ok(())
+    }
+
+    pub fn load_wallet(&self) -> Result<Option<Wallet>, Box<dyn std::error::Error>> {
+        match self.db.get(b"wallet")? {
+            Some(data) => {
+                let wallet: Wallet = bincode::deserialize(&data)?;
+                Ok(Some(wallet))
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn flush(&self) -> Result<(), Box<dyn std::error::Error>> {
