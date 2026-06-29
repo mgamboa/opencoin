@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::RwLock;
+use chrono::{DateTime, FixedOffset, NaiveDateTime};
 
 use crate::chain::blockchain::Blockchain;
 use crate::wallet::Wallet;
@@ -152,6 +153,13 @@ async fn handle_connection(
     };
 
     let _ = stream.write_all(response.as_bytes()).await;
+}
+
+fn format_timestamp(ts: u64) -> String {
+    let aest = FixedOffset::east_opt(10 * 3600).unwrap_or(FixedOffset::east_opt(0).unwrap());
+    let naive = NaiveDateTime::from_timestamp_opt(ts as i64, 0).unwrap_or_default();
+    let dt: DateTime<FixedOffset> = DateTime::from_naive_utc_and_offset(naive, aest);
+    dt.format("%d/%m/%Y %I:%M:%S %p AEST").to_string()
 }
 
 const DOWNLOAD_HTML: &str = r##"
@@ -360,9 +368,10 @@ async fn blocks_html(blockchain: &Arc<RwLock<Blockchain>>) -> String {
                     (total, addr, block.transactions.len())
                 })
                 .unwrap_or((0, String::new(), 0));
+            let ts_str = format_timestamp(block.header.timestamp);
             rows.push_str(&format!(
                 "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-                h, short_hash, reward, recipient, tx_count, block.header.timestamp,
+                h, short_hash, reward, recipient, tx_count, ts_str,
             ));
             if h == height {
                 for (ti, tx) in block.transactions.iter().enumerate() {
