@@ -35,6 +35,8 @@ enum Commands {
         #[arg(short, long, default_value_t = config::RPC_PORT)]
         rpc_port: u16,
         #[arg(long)]
+        peer: Option<String>,
+        #[arg(long)]
         mine: bool,
         #[arg(long)]
         premine_key: Option<String>,
@@ -53,8 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Start { data_dir, p2p_port, rpc_port, mine, premine_key } => {
-            run_node(&data_dir, p2p_port, rpc_port, mine, premine_key).await?;
+        Commands::Start { data_dir, p2p_port, rpc_port, peer, mine, premine_key } => {
+            run_node(&data_dir, p2p_port, rpc_port, peer.as_deref(), mine, premine_key).await?;
         }
         Commands::GenerateGenesis { premine_address, output } => {
             generate_genesis(&premine_address, &output)?;
@@ -68,6 +70,7 @@ async fn run_node(
     data_dir: &str,
     p2p_port: u16,
     rpc_port: u16,
+    peer: Option<&str>,
     mine: bool,
     premine_key: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -104,7 +107,7 @@ async fn run_node(
     }
 
     let wallet = Arc::new(RwLock::new(Some(Wallet::from_keypair(premine_kp, "premine"))));
-    let p2p = Arc::new(P2PNetwork::new(p2p_port));
+    let p2p = Arc::new(P2PNetwork::new(p2p_port, blockchain.clone()));
     let rpc_server = RpcServer::new(blockchain.clone(), wallet.clone(), p2p.clone(), rpc_port);
 
     let _storage = if let Ok(s) = Storage::new(&format!("{}/db", expanded_dir)) {
@@ -114,6 +117,23 @@ async fn run_node(
         warn!("Storage initialization failed, running without persistence");
         None
     };
+
+    if let Some(peer_addr) = peer {
+        let peer_str = peer_addr.to_string();
+        info!("Connecting to peer: {}", peer_str);
+        let addr: std::net::SocketAddr = peer_addr.parse()?;
+        let p2p_clone = p2p.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            if let Err(e) = p2p_clone.connect_to_peer(addr).await {
+                warn!("Failed to connect to peer {}: {}", peer_str, e);
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            p2p_clone.send_to(&addr, &opencoin::p2p::Message::GetBlocks(0)).await;
+            info!("Sent GetBlocks request to {}", peer_str);
+        });
+    }
 
     let bc_for_mining = blockchain.clone();
     let w_for_mining = wallet.clone();

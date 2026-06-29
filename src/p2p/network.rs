@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 use serde::{Deserialize, Serialize};
 use log::{info, warn, error};
 
-use crate::config;
 use crate::chain::block::Block;
 use crate::chain::transaction::Transaction;
+use crate::chain::blockchain::Blockchain;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
@@ -24,27 +24,22 @@ pub enum Message {
     MempoolResponse(Vec<Transaction>),
 }
 
-pub struct Peer {
-    pub address: SocketAddr,
-    pub connection: TcpStream,
-    pub height: u64,
-    pub version: u32,
-}
-
 pub struct P2PNetwork {
-    pub peers: Arc<RwLock<Vec<Peer>>>,
+    pub peers: Arc<RwLock<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>>,
     pub mempool: Arc<RwLock<Vec<Transaction>>>,
     pub our_address: SocketAddr,
     pub known_peers: Arc<RwLock<Vec<SocketAddr>>>,
+    pub blockchain: Arc<RwLock<Blockchain>>,
 }
 
 impl P2PNetwork {
-    pub fn new(port: u16) -> Self {
+    pub fn new(port: u16, blockchain: Arc<RwLock<Blockchain>>) -> Self {
         P2PNetwork {
-            peers: Arc::new(RwLock::new(Vec::new())),
+            peers: Arc::new(RwLock::new(HashMap::new())),
             mempool: Arc::new(RwLock::new(Vec::new())),
             our_address: format!("0.0.0.0:{}", port).parse().unwrap(),
             known_peers: Arc::new(RwLock::new(Vec::new())),
+            blockchain,
         }
     }
 
@@ -56,7 +51,7 @@ impl P2PNetwork {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     info!("New peer connected: {}", addr);
-                    tokio::spawn(handle_peer(stream, addr));
+                    self.spawn_peer(stream, addr).await;
                 }
                 Err(e) => {
                     error!("Failed to accept connection: {}", e);
@@ -66,45 +61,111 @@ impl P2PNetwork {
     }
 
     pub async fn connect_to_peer(&self, addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
+        if self.peers.read().await.contains_key(&addr) {
+            return Ok(());
+        }
         let stream = TcpStream::connect(addr).await?;
         info!("Connected to peer: {}", addr);
-        let mut peer = Peer {
-            address: addr,
-            connection: stream,
-            height: 0,
-            version: 1,
+        self.spawn_peer(stream, addr).await;
+        self.send_to(&addr, &Message::Ping(crate::PROTOCOL_VERSION as u64)).await;
+        Ok(())
+    }
+
+    async fn spawn_peer(&self, stream: TcpStream, addr: SocketAddr) {
+        let (read_half, mut write_half) = tokio::io::split(stream);
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+        {
+            let mut peers = self.peers.write().await;
+            peers.insert(addr, tx);
+        }
+
+        let peers = self.peers.clone();
+        let blockchain = self.blockchain.clone();
+
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            loop {
+                match rx.recv().await {
+                    Some(data) => {
+                        if write_half.write_all(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            let mut p = peers.write().await;
+            p.remove(&addr);
+            info!("Peer {} write task ended", addr);
+        });
+
+        let peers = self.peers.clone();
+        let blockchain = self.blockchain.clone();
+        let our_address = self.our_address;
+
+        let peers2 = self.peers.clone();
+        let blockchain2 = self.blockchain.clone();
+        let our_addr = self.our_address;
+
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut read_half = read_half;
+            loop {
+                let result = read_message_inner(&mut read_half).await;
+                match result {
+                    Ok(Some(msg)) => {
+                        let guard = peers.read().await;
+                        handle_message(msg, &addr, &guard, &blockchain, &our_address).await;
+                        drop(guard);
+                    }
+                    Ok(None) => {
+                        info!("Peer {} disconnected", addr);
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("Peer {} error: {}", addr, e);
+                        break;
+                    }
+                }
+            }
+            let mut p = peers.write().await;
+            p.remove(&addr);
+            info!("Peer {} read task ended", addr);
+        });
+    }
+
+    pub async fn broadcast_message(&self, msg: &Message) {
+        let data = match bincode::serialize(msg) {
+            Ok(d) => d,
+            Err(_) => return,
         };
-
-            let ping_msg = Message::Ping(crate::PROTOCOL_VERSION as u64);
-        let data = bincode::serialize(&ping_msg)?;
-        // Need to send data - simplified for now
-        peer.connection.writable().await?;
-        // peer.connection.try_write(&data)?;
-
-        let mut peers = self.peers.write().await;
-        peers.push(peer);
-        Ok(())
+        let data = encode_length_prefixed(&data);
+        let peers = self.peers.read().await;
+        for (addr, tx) in peers.iter() {
+            if let Err(e) = tx.send(data.clone()) {
+                warn!("Failed to send to {}: {}", addr, e);
+            }
+        }
     }
 
-    pub async fn broadcast_block(&self, block: &Block) -> Result<(), Box<dyn std::error::Error>> {
-        let msg = Message::Block(Box::new(block.clone()));
-        let data = bincode::serialize(&msg)?;
+    pub async fn send_to(&self, addr: &SocketAddr, msg: &Message) {
+        let data = match bincode::serialize(msg) {
+            Ok(d) => encode_length_prefixed(&d),
+            Err(_) => return,
+        };
         let peers = self.peers.read().await;
-        for peer in peers.iter() {
-            // peer.connection.writable().await?;
-            // peer.connection.try_write(&data)?;
+        if let Some(tx) = peers.get(addr) {
+            let _ = tx.send(data);
         }
-        Ok(())
     }
 
-    pub async fn broadcast_transaction(&self, tx: &Transaction) -> Result<(), Box<dyn std::error::Error>> {
-        let msg = Message::Transaction(Box::new(tx.clone()));
-        let data = bincode::serialize(&msg)?;
-        let peers = self.peers.read().await;
-        for peer in peers.iter() {
-            // Simplified
-        }
-        Ok(())
+    pub async fn broadcast_block(&self, block: &Block) {
+        self.broadcast_message(&Message::Block(Box::new(block.clone()))).await;
+    }
+
+    pub async fn broadcast_transaction(&self, tx: &Transaction) {
+        self.broadcast_message(&Message::Transaction(Box::new(tx.clone()))).await;
     }
 
     pub async fn add_to_mempool(&self, tx: Transaction) {
@@ -115,45 +176,100 @@ impl P2PNetwork {
     }
 }
 
-async fn handle_peer(mut stream: TcpStream, addr: SocketAddr) {
-    info!("Handling peer: {}", addr);
-    loop {
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            read_message(&mut stream),
-        )
-        .await
-        {
-            Ok(Ok(msg)) => {
-                match msg {
-                    Message::Ping(_version) => {
-                        let pong = Message::Pong(crate::PROTOCOL_VERSION as u64);
-                        if let Ok(data) = bincode::serialize(&pong) {
-                            let _ = stream.try_write(&data);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Ok(Err(_)) => {
-                warn!("Peer {} disconnected", addr);
-                break;
-            }
-            Err(_) => {
-                info!("Peer {} timed out", addr);
-                break;
-            }
-        }
-    }
+fn encode_length_prefixed(data: &[u8]) -> Vec<u8> {
+    let len = (data.len() as u32).to_le_bytes();
+    [&len, data].concat()
 }
 
-async fn read_message(stream: &mut TcpStream) -> Result<Message, Box<dyn std::error::Error>> {
-    use tokio::io::AsyncReadExt;
+async fn read_message_inner<R>(read_half: &mut R) -> Result<Option<Message>, Box<dyn std::error::Error + Send + Sync>>
+where
+    R: tokio::io::AsyncReadExt + Unpin + Send,
+{
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
+    match read_half.read_exact(&mut len_buf).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(Box::new(e)),
+    }
     let len = u32::from_le_bytes(len_buf) as usize;
     let mut data = vec![0u8; len];
-    stream.read_exact(&mut data).await?;
-    let msg: Message = bincode::deserialize(&data)?;
-    Ok(msg)
+    read_half.read_exact(&mut data).await.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    let msg: Message = bincode::deserialize(&data).map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+    Ok(Some(msg))
+}
+
+async fn handle_message(
+    msg: Message,
+    addr: &SocketAddr,
+    peers: &HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>,
+    blockchain: &Arc<RwLock<Blockchain>>,
+    our_address: &SocketAddr,
+) {
+    match msg {
+        Message::Ping(version) => {
+            info!("Ping from {} (v{})", addr, version);
+            if let Some(tx) = peers.get(addr) {
+                let pong = bincode::serialize(&Message::Pong(crate::PROTOCOL_VERSION as u64)).unwrap();
+                let _ = tx.send(encode_length_prefixed(&pong));
+            }
+        }
+        Message::Pong(version) => {
+            info!("Pong from {} (v{})", addr, version);
+        }
+        Message::Block(block) => {
+            info!("Received block {} from {}: hash={}", block.header.height, addr, hex::encode(block.hash()));
+            let mut bc = blockchain.write().await;
+            let height = block.header.height;
+            if height > bc.state.height {
+                match bc.add_block(*block) {
+                    Ok(()) => info!("Added block {} from peer", height),
+                    Err(e) => warn!("Failed to add block from peer {}: {}", addr, e),
+                }
+            }
+        }
+        Message::GetBlocks(from_height) => {
+            let bc = blockchain.read().await;
+            let mut blocks = Vec::new();
+            for h in from_height..=bc.state.height {
+                if let Some(block) = bc.get_block(h) {
+                    blocks.push(block.clone());
+                }
+            }
+            if !blocks.is_empty() {
+                if let Some(tx) = peers.get(addr) {
+                    let resp = bincode::serialize(&Message::Blocks(blocks)).unwrap();
+                    let _ = tx.send(encode_length_prefixed(&resp));
+                }
+            }
+        }
+        Message::Blocks(blocks) => {
+            info!("Received {} blocks from {}", blocks.len(), addr);
+            let mut bc = blockchain.write().await;
+            for block in blocks {
+                let height = block.header.height;
+                if height > bc.state.height {
+                    if let Err(e) = bc.add_block(block) {
+                        warn!("Failed to add block {} from peer: {}", height, e);
+                        break;
+                    }
+                    info!("Synced block {}", height);
+                }
+            }
+        }
+        Message::GetPeers => {
+            let known = vec![*our_address];
+            if let Some(tx) = peers.get(addr) {
+                let resp = bincode::serialize(&Message::Peers(known)).unwrap();
+                let _ = tx.send(encode_length_prefixed(&resp));
+            }
+        }
+        Message::Peers(_) => {}
+        Message::MempoolRequest => {
+            // no-op for now
+        }
+        Message::MempoolResponse(_) => {}
+        Message::Transaction(tx) => {
+            info!("Received transaction from {}: {}", addr, hex::encode(tx.hash()));
+        }
+    }
 }
