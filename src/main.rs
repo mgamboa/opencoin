@@ -235,6 +235,40 @@ async fn run_node(
         }
         s
     };
+
+    // Load persisted peers into P2P
+    p2p.load_peers_from_storage_sync();
+
+    // If no seeds specified and no stored peers, try bootstrap from peers.json
+    if seed_list.is_empty() {
+        let stored_peers = p2p.known_peers.read().await.len();
+        if stored_peers == 0 {
+            let peers_path = std::path::Path::new("peers.json");
+            if peers_path.exists() {
+                if let Ok(data) = std::fs::read_to_string(peers_path) {
+                    if let Ok(bootstrap_peers) = serde_json::from_str::<Vec<String>>(&data) {
+                        for p in &bootstrap_peers {
+                            info!("Bootstrap peer from peers.json: {}", p);
+                        }
+                        // Use spawn to avoid holding mutex across await
+                        let p2p_clone2 = p2p.clone();
+                        tokio::spawn(async move {
+                            for addr_str in bootstrap_peers {
+                                match tokio::net::lookup_host(&addr_str).await {
+                                    Ok(mut addrs) => {
+                                        if let Some(addr) = addrs.next() {
+                                            let _ = p2p_clone2.connect_to_peer(addr).await;
+                                        }
+                                    }
+                                    Err(e) => warn!("Failed to resolve bootstrap peer {}: {}", addr_str, e),
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    }
     let p2p_clone = p2p.clone();
     tokio::spawn(async move {
         loop {

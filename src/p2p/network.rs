@@ -61,6 +61,29 @@ impl P2PNetwork {
         self
     }
 
+    pub fn load_peers_from_storage_sync(&self) {
+        if let Some(ref st) = self.storage {
+            if let Ok(s) = st.lock() {
+                if let Ok(peers) = s.load_peers() {
+                    if let Ok(mut known) = self.known_peers.try_write() {
+                        *known = peers;
+                        log::info!("Loaded {} peers from storage", known.len());
+                    }
+                }
+            }
+        }
+    }
+
+    fn save_peers_sync(&self) {
+        if let Some(ref st) = self.storage {
+            if let Ok(known) = self.known_peers.try_read() {
+                if let Ok(s) = st.lock() {
+                    let _ = s.save_peers(&known);
+                }
+            }
+        }
+    }
+
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind(self.our_address).await?;
         info!("P2P server listening on {}", self.our_address);
@@ -93,6 +116,7 @@ impl P2PNetwork {
                         let mut known = self.known_peers.write().await;
                         if !known.contains(&addr) {
                             known.push(addr);
+                            self.save_peers_sync();
                         }
                     }
                     self.spawn_peer(stream, addr).await;
@@ -117,6 +141,7 @@ impl P2PNetwork {
             let mut known = self.known_peers.write().await;
             if !known.contains(&addr) {
                 known.push(addr);
+                self.save_peers_sync();
             }
         }
 
@@ -362,11 +387,22 @@ async fn handle_message2(
         }
         Message::Peers(peer_list) => {
             let count = peer_list.len();
+            let mut changed = false;
             for paddr in peer_list {
                 if paddr == our_address { continue; }
                 let mut known = known_peers.write().await;
                 if !known.contains(&paddr) {
                     known.push(paddr);
+                    changed = true;
+                }
+                drop(known);
+            }
+            if changed {
+                if let Some(ref st) = storage {
+                    let known = known_peers.read().await;
+                    if let Ok(s) = st.lock() {
+                        let _ = s.save_peers(&known);
+                    }
                 }
             }
             info!("Discovered {} peers from {}", count, addr);

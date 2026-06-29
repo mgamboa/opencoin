@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use sled::Db;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
@@ -119,6 +120,22 @@ impl Storage {
                 Ok(Some(wallet))
             }
             None => Ok(None),
+        }
+    }
+
+    pub fn save_peers(&self, peers: &[SocketAddr]) -> Result<(), Box<dyn std::error::Error>> {
+        let value = bincode::serialize(peers)?;
+        self.db.insert(b"known_peers", value)?;
+        Ok(())
+    }
+
+    pub fn load_peers(&self) -> Result<Vec<SocketAddr>, Box<dyn std::error::Error>> {
+        match self.db.get(b"known_peers")? {
+            Some(data) => {
+                let peers: Vec<SocketAddr> = bincode::deserialize(&data)?;
+                Ok(peers)
+            }
+            None => Ok(Vec::new()),
         }
     }
 

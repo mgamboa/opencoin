@@ -50,6 +50,19 @@ Pool operators run a pool server that:
 
 **Pool server is built into the node.** Start with `--pool` flag.
 
+### Live Public Network
+
+| Service | Address | Port |
+|---------|---------|------|
+| P2P Seed | `mail.laat.com.au` | 9768 |
+| RPC / Web | `http://mail.laat.com.au:9769` | 9769 |
+| **Pool** | **`mail.laat.com.au`** | **3333** |
+
+Miners connect to the pool with:
+```bash
+opencoin-miner --pool mail.laat.com.au:3333 --address YOUR-OC-ADDRESS --threads 4
+```
+
 ## Prerequisites
 
 - **Rust** 1.70+ ([install](https://rustup.rs))
