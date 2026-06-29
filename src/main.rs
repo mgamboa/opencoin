@@ -159,15 +159,21 @@ async fn run_node(
                 saved_wallet
             } else {
                 let mut w = Wallet::from_keypair(premine_kp, "premine");
-                w.balance = config::PREMINE_AMOUNT;
                 w.transactions.push([0u8; 32]);
+                use opencoin::chain::transaction::OutPoint;
+                let premine_outpoint = OutPoint { tx_hash: [0u8; 32], index: 0 };
+                w.utxos.insert("premine".to_string(), (premine_outpoint, config::PREMINE_AMOUNT));
+                w.balance = config::PREMINE_AMOUNT;
                 let _ = s.save_wallet(&w);
                 w
             }
         } else {
             let mut w = Wallet::from_keypair(premine_kp, "premine");
-            w.balance = config::PREMINE_AMOUNT;
             w.transactions.push([0u8; 32]);
+            use opencoin::chain::transaction::OutPoint;
+            let premine_outpoint = OutPoint { tx_hash: [0u8; 32], index: 0 };
+            w.utxos.insert("premine".to_string(), (premine_outpoint, config::PREMINE_AMOUNT));
+            w.balance = config::PREMINE_AMOUNT;
             w
         }
     })));
