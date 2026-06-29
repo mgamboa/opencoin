@@ -173,20 +173,17 @@ sudo cp target/release/opencoin-{node,wallet,miner} /usr/local/bin/</pre>
 <p>Requires Rust: <code>curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh</code></p>
 </div>
 <div class=card><h3>Quick Start (Join Network)</h3>
-<pre># Start a node that connects to the seed:
-opencoin-node start --seed mail.laat.com.au:9768
+<pre># Start a relay node (bootstraps from peers.json):
+opencoin-node start
 
-# Start a mining node (earns block rewards):
-opencoin-node start --seed mail.laat.com.au:9768 --mine --premine-key YOUR-SECRET-KEY
+# Start a mining node with your wallet:
+opencoin-node start --mine --premine-key YOUR-SECRET-KEY
 
-# Connect miner to a specific pool:
-opencoin-miner --pool any-public-node:3333 --address YOUR-OC-ADDRESS --threads 4
-
-# Or discover a live pool automatically from peers.json:
+# Discover a live pool and mine:
 opencoin-miner --discover --address YOUR-OC-ADDRESS --threads 4
 
-# Or auto-discover a live pool from peers.json:
-opencoin-miner --discover --address YOUR-OC-ADDRESS --threads 4
+# Or connect to a specific pool:
+opencoin-miner --pool host:3333 --address YOUR-OC-ADDRESS --threads 4
 
 # Create a wallet:
 opencoin-wallet create --name my-wallet</pre>
@@ -206,7 +203,7 @@ opencoin-wallet generate-key</pre>
 <div class=card><h3>Wallet Recovery</h3>
 <p>Your wallet <strong>IS your secret key</strong>. Lose the machine, not the key.</p>
 <pre># Recover wallet from secret key:
-opencoin-node start --seed mail.laat.com.au:9768 --premine-key YOUR-SECRET-HEX-KEY
+opencoin-node start --premine-key YOUR-SECRET-HEX-KEY
 
 # View your address and balance:
 opencoin-wallet show --name my-wallet
