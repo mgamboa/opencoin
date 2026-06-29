@@ -179,14 +179,21 @@ async fn run_node(
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         for seed_str in &seed_list {
             info!("Connecting to seed peer: {}", seed_str);
-            if let Ok(addr) = seed_str.parse::<std::net::SocketAddr>() {
-                if let Err(e) = p2p_clone.connect_to_peer(addr).await {
-                    warn!("Failed to connect to seed {}: {}", seed_str, e);
-                } else {
-                    p2p_clone.send_to(&addr, &opencoin::p2p::Message::GetBlocks(0)).await;
-                    p2p_clone.send_to(&addr, &opencoin::p2p::Message::GetPeers).await;
-                    info!("Connected to seed {}, requesting blocks & peers", seed_str);
+            match tokio::net::lookup_host(seed_str).await {
+                Ok(mut addrs) => {
+                    if let Some(addr) = addrs.next() {
+                        if let Err(e) = p2p_clone.connect_to_peer(addr).await {
+                            warn!("Failed to connect to seed {}: {}", seed_str, e);
+                        } else {
+                            p2p_clone.send_to(&addr, &opencoin::p2p::Message::GetBlocks(0)).await;
+                            p2p_clone.send_to(&addr, &opencoin::p2p::Message::GetPeers).await;
+                            info!("Connected to seed {}, requesting blocks & peers", seed_str);
+                        }
+                    } else {
+                        warn!("Could not resolve seed: {}", seed_str);
+                    }
                 }
+                Err(e) => warn!("Failed to resolve seed {}: {}", seed_str, e),
             }
         }
     });
