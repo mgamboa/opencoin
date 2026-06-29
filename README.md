@@ -40,13 +40,15 @@ A decentralized, mineable cryptocurrency for everyday use. CPU-friendly, ASIC-re
 
 Each mined block creates a **coinbase transaction** that sends the block reward to the miner's wallet address. Solo miners receive 100% of the block reward.
 
-### Mining Pools (Coming Soon)
+### Mining Pools
 
-Pool operators will run a pool server that:
+Pool operators run a pool server that:
 1. Distributes work to miners (lower-difficulty shares)
 2. Tracks shares submitted by each miner
 3. When a pool miner finds a block, the reward is distributed proportionally
 4. Pool operators can take a fee (typically 1-2%)
+
+**Pool server is built into the node.** Start with `--pool` flag.
 
 ## Prerequisites
 
@@ -119,6 +121,71 @@ When you run `opencoin-node start --mine`, the node:
 
 The wallet balance is tracked locally. Initially, difficulty is 1 (instant mining). As the chain grows, difficulty adjusts to maintain 2-minute block intervals.
 
+## Pool Server
+
+Start a node with pool support:
+
+```bash
+./target/release/opencoin-node start --pool --pool-port 3333
+```
+
+This generates a pool wallet keypair. **SAVE the pool secret key** to collect rewards.
+
+### Connect a miner
+
+```bash
+# Clone and build on another machine, then:
+./target/release/opencoin-miner --pool <pool_ip>:3333 --threads 4
+```
+
+The miner connects to the pool, receives work units, and submits shares when it finds hashes below the share target.
+
+### Pool Configuration
+
+| Flag | Default | Description |
+|---|---|---|
+| `--pool` | false | Enable pool server |
+| `--pool-port` | 3333 | Pool TCP port |
+| `--pool-address` | (auto) | Pool wallet hex public key |
+
+### Pool Protocol
+
+The pool uses JSON-line TCP protocol:
+
+**Pool → Miner (Job):**
+```json
+{"type":"job","job_id":1,"height":1,"target":18446744073709551615,"share_target":18446744073709551,"header":"01000000..."}
+```
+
+**Miner → Pool (Submit):**
+```json
+{"type":"submit","job_id":1,"nonce":12345,"thread":0}
+```
+
+**Pool → Miner (Result):**
+```json
+{"type":"result","job_id":1,"nonce":12345,"status":"accepted","message":"Share accepted"}
+```
+
+### Miner Performance
+
+On a modern x86-64 CPU, each thread achieves ~1.1 MH/s. On Raspberry Pi 4 (ARM64), expect ~100-200 KH/s per thread.
+
+## Web Dashboard
+
+The node includes a web interface at `http://<node_ip>:9769/`.
+
+### Pages
+
+| Path | Description |
+|---|---|
+| `/` | Blockchain dashboard (height, supply, peers) |
+| `/wallet` | Wallet balance and address |
+| `/blocks` | Recent blocks list |
+| `/pool` | Pool status, connected miners, shares |
+
+The dashboard auto-refreshes every 2 seconds.
+
 ## RPC API
 
 The node exposes a JSON-RPC 2.0 API on `http://<node_ip>:9769/`.
@@ -153,6 +220,7 @@ curl -s http://localhost:9769/ -d '{"method":"getaddress","params":[],"id":1}'
 | `getblock` | [height] | block hash, timestamp, tx count |
 | `getbalance` | none | balance, locked, address |
 | `getaddress` | none | wallet address |
+| `getpoolstats` | none | pool miners, shares, current job |
 
 ## Network
 
@@ -230,7 +298,9 @@ MIT
 - [x] Solo CPU mining
 - [x] P2P network with block sync
 - [x] Web dashboard + RPC
-- [ ] Mining pool server
+- [x] Mining pool server
+- [x] Web wallet + pool dashboard
+- [ ] Block persistence (save/load chain from disk)
 - [ ] WASM smart contracts
 - [ ] RingCT (confidential transactions)
 - [ ] Mobile wallet

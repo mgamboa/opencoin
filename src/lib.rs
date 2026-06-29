@@ -8,6 +8,7 @@ pub mod wallet;
 pub mod rpc;
 pub mod vm;
 pub mod util;
+pub mod pool;
 
 pub const OPENCOIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL_VERSION: u32 = 1;

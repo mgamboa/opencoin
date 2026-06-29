@@ -14,6 +14,7 @@ use opencoin::crypto::stealth::StealthAddress;
 use opencoin::crypto::keys::{PublicKey, KeyPair, SecretKey};
 use opencoin::p2p::P2PNetwork;
 use opencoin::rpc::RpcServer;
+use opencoin::pool::PoolServer;
 use opencoin::storage::db::Storage;
 use opencoin::wallet::Wallet;
 
@@ -40,6 +41,12 @@ enum Commands {
         mine: bool,
         #[arg(long)]
         premine_key: Option<String>,
+        #[arg(long)]
+        pool: bool,
+        #[arg(long, default_value_t = 3333)]
+        pool_port: u16,
+        #[arg(long)]
+        pool_address: Option<String>,
     },
     GenerateGenesis {
         #[arg(long)]
@@ -55,8 +62,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Start { data_dir, p2p_port, rpc_port, peer, mine, premine_key } => {
-            run_node(&data_dir, p2p_port, rpc_port, peer.as_deref(), mine, premine_key).await?;
+        Commands::Start { data_dir, p2p_port, rpc_port, peer, mine, premine_key, pool, pool_port, pool_address } => {
+            run_node(&data_dir, p2p_port, rpc_port, peer.as_deref(), mine, premine_key, pool, pool_port, pool_address).await?;
         }
         Commands::GenerateGenesis { premine_address, output } => {
             generate_genesis(&premine_address, &output)?;
@@ -73,6 +80,9 @@ async fn run_node(
     peer: Option<&str>,
     mine: bool,
     premine_key: Option<String>,
+    enable_pool: bool,
+    pool_port: u16,
+    pool_address: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let expanded_dir = shellexpand::tilde(data_dir).to_string();
     std::fs::create_dir_all(&expanded_dir)?;
@@ -108,7 +118,38 @@ async fn run_node(
 
     let wallet = Arc::new(RwLock::new(Some(Wallet::from_keypair(premine_kp, "premine"))));
     let p2p = Arc::new(P2PNetwork::new(p2p_port, blockchain.clone()));
-    let rpc_server = RpcServer::new(blockchain.clone(), wallet.clone(), p2p.clone(), rpc_port);
+
+    let pool_server: Option<Arc<PoolServer>> = if enable_pool {
+        let pool_addr_stealth = match pool_address {
+            Some(ref addr_hex) => {
+                let pub_bytes = hex::decode(addr_hex)?;
+                let public_key = opencoin::crypto::keys::PublicKey::from_bytes(&pub_bytes)?;
+                StealthAddress {
+                    spend_pub: public_key.clone(),
+                    view_pub: public_key,
+                }
+            }
+            None => {
+                let kp = opencoin::crypto::keys::KeyPair::generate();
+                info!("Generated pool wallet keypair");
+                info!("Pool public key: {}", hex::encode(kp.public.0));
+                info!("Pool secret key: {}", hex::encode(kp.secret.0));
+                info!("SAVE THIS POOL SECRET KEY!");
+                StealthAddress {
+                    spend_pub: kp.public.clone(),
+                    view_pub: kp.public,
+                }
+            }
+        };
+        let pool = PoolServer::new(pool_port, pool_addr_stealth, blockchain.clone());
+        let pool_arc = Arc::new(pool);
+        info!("Pool server configured on port {}", pool_port);
+        Some(pool_arc)
+    } else {
+        None
+    };
+
+    let rpc_server = RpcServer::new(blockchain.clone(), wallet.clone(), p2p.clone(), pool_server.clone(), rpc_port);
 
     let _storage = if let Ok(s) = Storage::new(&format!("{}/db", expanded_dir)) {
         info!("Storage initialized");
@@ -200,6 +241,15 @@ async fn run_node(
             error!("P2P server error: {}", e);
         }
     });
+
+    if let Some(ref pool) = pool_server {
+        let pool_clone = pool.clone();
+        tokio::spawn(async move {
+            if let Err(e) = pool_clone.start().await {
+                error!("Pool server error: {}", e);
+            }
+        });
+    }
 
     if let Err(e) = rpc_server.start().await {
         error!("RPC server error: {}", e);
