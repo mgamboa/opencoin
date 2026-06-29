@@ -1,0 +1,53 @@
+use blake3::Hash as Blake3Hash;
+use sha3::{Digest, Sha3_256, Sha3_512};
+
+pub fn blake3_hash(data: &[u8]) -> [u8; 32] {
+    *blake3::hash(data).as_bytes()
+}
+
+pub fn sha3_256(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha3_256::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&result);
+    out
+}
+
+pub fn sha3_512(data: &[u8]) -> [u8; 64] {
+    let mut hasher = Sha3_512::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    let mut out = [0u8; 64];
+    out.copy_from_slice(&result);
+    out
+}
+
+pub fn double_sha3_256(data: &[u8]) -> [u8; 32] {
+    sha3_256(&sha3_256(data))
+}
+
+pub fn hash_to_scalar(data: &[u8]) -> [u8; 32] {
+    blake3_hash(data)
+}
+
+pub fn merkle_root(hashes: &[[u8; 32]]) -> [u8; 32] {
+    if hashes.is_empty() {
+        return [0u8; 32];
+    }
+    if hashes.len() == 1 {
+        return hashes[0];
+    }
+    let mut next_level = Vec::with_capacity((hashes.len() + 1) / 2);
+    for chunk in hashes.chunks(2) {
+        if chunk.len() == 2 {
+            let mut combined = Vec::with_capacity(64);
+            combined.extend_from_slice(&chunk[0]);
+            combined.extend_from_slice(&chunk[1]);
+            next_level.push(blake3_hash(&combined));
+        } else {
+            next_level.push(chunk[0]);
+        }
+    }
+    merkle_root(&next_level)
+}

@@ -1,0 +1,50 @@
+[package]
+name = "opencoin"
+version = "0.1.0"
+edition = "2021"
+description = "OpenCoin - A private, mineable, open cryptocurrency"
+authors = ["Mario Gamboa"]
+repository = "https://github.com/mgamboa/opencoin"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
+getrandom = "0.3"
+sha3 = "0.10"
+blake3 = "1.5"
+hex = "0.4"
+curve25519-dalek = "4"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+clap = { version = "4", features = ["derive"] }
+jsonrpsee = { version = "0.24", features = ["server", "client"] }
+log = "0.4"
+env_logger = "0.11"
+chrono = "0.4"
+thiserror = "2"
+
+num-bigint = "0.4"
+num-traits = "0.2"
+sled = "0.34"
+shellexpand = "3"
+ctrlc = "3"
+
+[[bin]]
+name = "opencoin-node"
+path = "src/main.rs"
+
+[[bin]]
+name = "opencoin-wallet"
+path = "src/bin/wallet.rs"
+
+[[bin]]
+name = "opencoin-miner"
+path = "src/bin/miner.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

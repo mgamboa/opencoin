@@ -1,0 +1,123 @@
+use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+use crate::crypto::keys::{KeyPair, PublicKey, SecretKey, generate_keypair, public_key_to_address};
+use crate::crypto::stealth::{StealthAddress, create_stealth_output, recover_stealth_output, OneTimeOutput};
+use crate::chain::transaction::{Transaction, TransactionType, TxInput, TxOutput};
+use crate::chain::address::OpenCoinAddress;
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Wallet {
+    #[serde(rename = "keypair")]
+    keypair_data: KeypairData,
+    pub balance: u64,
+    pub locked_balance: u64,
+    pub transactions: Vec<[u8; 32]>,
+    pub name: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct KeypairData {
+    public: Vec<u8>,
+    secret: Vec<u8>,
+}
+
+impl Wallet {
+    pub fn new(name: &str) -> Self {
+        let kp = generate_keypair();
+        Wallet {
+            keypair_data: KeypairData {
+                public: kp.public.0.to_vec(),
+                secret: kp.secret.0.to_vec(),
+            },
+            balance: 0,
+            locked_balance: 0,
+            transactions: Vec::new(),
+            name: name.to_string(),
+        }
+    }
+
+    pub fn from_keypair(keypair: KeyPair, name: &str) -> Self {
+        Wallet {
+            keypair_data: KeypairData {
+                public: keypair.public.0.to_vec(),
+                secret: keypair.secret.0.to_vec(),
+            },
+            balance: 0,
+            locked_balance: 0,
+            transactions: Vec::new(),
+            name: name.to_string(),
+        }
+    }
+
+    pub fn keypair(&self) -> Result<KeyPair, &'static str> {
+        let pub_key = PublicKey::from_bytes(&self.keypair_data.public)?;
+        let sec_key = SecretKey::from_bytes(&self.keypair_data.secret)?;
+        Ok(KeyPair::from_secret_key(&sec_key))
+    }
+
+    pub fn main_address(&self) -> Result<OpenCoinAddress, &'static str> {
+        let kp = self.keypair()?;
+        Ok(OpenCoinAddress::new(&kp.public, &kp.public))
+    }
+
+    pub fn stealth_address(&self) -> Result<StealthAddress, &'static str> {
+        let kp = self.keypair()?;
+        Ok(StealthAddress {
+            spend_pub: kp.public.clone(),
+            view_pub: kp.public.clone(),
+        })
+    }
+
+    pub fn address_string(&self) -> Result<String, &'static str> {
+        let kp = self.keypair()?;
+        Ok(public_key_to_address(&kp.public))
+    }
+
+    pub fn create_transaction(
+        &self,
+        recipients: &[(StealthAddress, u64)],
+        fee: u64,
+    ) -> Result<Transaction, &'static str> {
+        let mut outputs = Vec::new();
+        let mut total_out = 0u64;
+
+        for (recipient, amount) in recipients {
+            let (output, _r) = create_stealth_output(recipient, *amount);
+            outputs.push(TxOutput {
+                stealth_address: recipient.clone(),
+                one_time_output: output,
+                amount: *amount,
+                view_key_proof: None,
+            });
+            total_out += amount;
+        }
+
+        Ok(Transaction {
+            version: 1,
+            tx_type: TransactionType::Private,
+            inputs: Vec::new(),
+            outputs,
+            fee,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            signatures: Vec::new(),
+            memo: None,
+        })
+    }
+
+    pub fn to_json(&self) -> String {
+        let addr = self.address_string().unwrap_or_default();
+        let pub_hex = hex::encode(&self.keypair_data.public);
+        serde_json::to_string_pretty(&serde_json::json!({
+            "name": self.name,
+            "address": addr,
+            "balance": self.balance,
+            "public_key": pub_hex,
+            "sub_addresses": 0,
+        }))
+        .unwrap_or_default()
+    }
+}
