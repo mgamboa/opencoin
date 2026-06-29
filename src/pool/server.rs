@@ -323,6 +323,7 @@ impl PoolServer {
                                                         info!("Pool found block {}! Nonce: {}", t.height, nonce);
                                                         info!("Pool fee: {} ({}%), miners: {} OC distributed to {} miners", 
                                                             pool_fee, POOL_FEE_PERCENT, miner_total, rs_snapshot.len());
+                                                        drop(bc);
                                                         if let Some(ref p) = p2p {
                                                             p.broadcast_block(&block).await;
                                                         }
