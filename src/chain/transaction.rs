@@ -58,6 +58,29 @@ impl Transaction {
         }
     }
 
+    pub fn coinbase_multi_output(recipients: &[(StealthAddress, u64)]) -> Self {
+        let mut outputs = Vec::with_capacity(recipients.len());
+        for (addr, amount) in recipients {
+            let (one_time_output, _) = crate::crypto::stealth::create_stealth_output(addr, *amount);
+            outputs.push(TxOutput {
+                stealth_address: addr.clone(),
+                one_time_output,
+                amount: *amount,
+                view_key_proof: None,
+            });
+        }
+        Transaction {
+            version: 1,
+            tx_type: TransactionType::Coinbase,
+            inputs: Vec::new(),
+            outputs,
+            fee: 0,
+            timestamp: 0,
+            signatures: Vec::new(),
+            memo: Some(String::from("Pool Coinbase")),
+        }
+    }
+
     pub fn hash(&self) -> [u8; 32] {
         let encoded = serde_json::to_vec(self).unwrap_or_default();
         crate::crypto::hash::double_sha3_256(&encoded)

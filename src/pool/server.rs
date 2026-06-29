@@ -7,6 +7,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 use log::{info, warn, error};
 
+use crate::chain::address::OpenCoinAddress;
 use crate::chain::block::{Block, BlockHeader, calculate_block_reward};
 use crate::chain::transaction::Transaction;
 use crate::chain::blockchain::Blockchain;
@@ -15,9 +16,12 @@ use crate::crypto::stealth::StealthAddress;
 use crate::consensus::difficulty::{calculate_difficulty, difficulty_to_compact};
 use crate::consensus::pow::{calculate_target, check_pow};
 
+pub const POOL_FEE_PERCENT: u64 = 2;
+
 #[derive(Debug, Clone)]
 pub struct MinerInfo {
     pub address: SocketAddr,
+    pub wallet_address: String,
     pub shares: u64,
     pub last_share_time: u64,
     pub valid_blocks: u64,
@@ -43,6 +47,7 @@ pub struct PoolServer {
     pub job_counter: Arc<AtomicU64>,
     pub total_shares: Arc<AtomicU64>,
     pub running: Arc<AtomicBool>,
+    pub round_shares: Arc<RwLock<HashMap<String, u64>>>,
 }
 
 impl PoolServer {
@@ -56,6 +61,7 @@ impl PoolServer {
             job_counter: Arc::new(AtomicU64::new(1)),
             total_shares: Arc::new(AtomicU64::new(0)),
             running: Arc::new(AtomicBool::new(true)),
+            round_shares: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -154,6 +160,7 @@ impl PoolServer {
             let mut m = miners.write().await;
             m.insert(addr, MinerInfo {
                 address: addr,
+                wallet_address: String::new(),
                 shares: 0,
                 last_share_time: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
                 valid_blocks: 0,
@@ -181,6 +188,7 @@ impl PoolServer {
         let miner_info = self.miners.clone();
         let ct = self.current_template.clone();
         let bc2 = self.blockchain.clone();
+        let round_shares = self.round_shares.clone();
 
         tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
@@ -199,6 +207,7 @@ impl PoolServer {
                                 "submit" => {
                                     let job_id = msg["job_id"].as_u64().unwrap_or(0);
                                     let nonce = msg["nonce"].as_u64().unwrap_or(0);
+                                    let wallet_addr = msg["address"].as_str().unwrap_or("").to_string();
 
                                     let template = ct.read().await;
                                     let result = if let Some(ref t) = *template {
@@ -219,16 +228,59 @@ impl PoolServer {
                                                 info.shares += 1;
                                                 info.last_share_time = SystemTime::now()
                                                     .duration_since(UNIX_EPOCH).unwrap().as_secs();
+                                                if !wallet_addr.is_empty() {
+                                                    info.wallet_address = wallet_addr.clone();
+                                                }
                                             }
                                             drop(m);
 
                                             let is_share = hash_val <= t.share_target;
                                             let is_block = hash_val <= t.block_target;
 
+                                            if is_share && !wallet_addr.is_empty() {
+                                                let mut rs = round_shares.write().await;
+                                                *rs.entry(wallet_addr.clone()).or_insert(0) += 1;
+                                                drop(rs);
+                                            }
+
                                             if is_block {
                                                 let mut bc = bc2.write().await;
                                                 let reward = calculate_block_reward(t.height, bc.state.premine_remaining);
-                                                let coinbase = Transaction::coinbase(reward, &pool_address);
+
+                                                let pool_fee = reward * POOL_FEE_PERCENT / 100;
+                                                let miner_total = reward - pool_fee;
+
+                                                let rs_snapshot = {
+                                                    let rs = round_shares.read().await;
+                                                    rs.clone()
+                                                };
+                                                {
+                                                    let mut rs = round_shares.write().await;
+                                                    rs.clear();
+                                                }
+
+                                                let total_round: u64 = rs_snapshot.values().sum();
+                                                let mut recipients: Vec<(StealthAddress, u64)> = Vec::new();
+                                                if total_round > 0 {
+                                                    let mut distributed: u64 = 0;
+                                                    for (addr_str, shares) in &rs_snapshot {
+                                                        let payout = miner_total * shares / total_round;
+                                                        if payout > 0 {
+                                                            if let Ok(oc_addr) = OpenCoinAddress::from_string(addr_str) {
+                                                                let miner_addr = oc_addr.to_stealth();
+                                                                recipients.push((miner_addr, payout));
+                                                                distributed += payout;
+                                                            }
+                                                        }
+                                                    }
+                                                    let remainder = miner_total.saturating_sub(distributed);
+                                                    if remainder > 0 {
+                                                        recipients.push((pool_address.clone(), remainder));
+                                                    }
+                                                }
+                                                recipients.push((pool_address.clone(), pool_fee));
+
+                                                let coinbase = Transaction::coinbase_multi_output(&recipients);
                                                 let tx_hashes = vec![coinbase.hash()];
                                                 let merkle = merkle_root(&tx_hashes);
 
@@ -250,6 +302,8 @@ impl PoolServer {
                                                 match bc.add_block(block.clone()) {
                                                     Ok(()) => {
                                                         info!("Pool found block {}! Nonce: {}", t.height, nonce);
+                                                        info!("Pool fee: {} ({}%), miners: {} OC distributed to {} miners", 
+                                                            pool_fee, POOL_FEE_PERCENT, miner_total, rs_snapshot.len());
                                                         let mut m = miners.write().await;
                                                         if let Some(info) = m.get_mut(&addr) {
                                                             info.valid_blocks += 1;
@@ -308,6 +362,7 @@ impl PoolServer {
         for (addr, info) in miners.iter() {
             miner_list.push(serde_json::json!({
                 "address": addr.to_string(),
+                "wallet": info.wallet_address,
                 "shares": info.shares,
                 "blocks_found": info.valid_blocks,
                 "last_share": info.last_share_time,

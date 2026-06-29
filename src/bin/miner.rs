@@ -14,6 +14,8 @@ struct Cli {
     pool: String,
     #[arg(short, long, default_value_t = 1)]
     threads: u32,
+    #[arg(short, long)]
+    address: String,
 }
 
 #[tokio::main]
@@ -91,10 +93,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    let miner_address = cli.address.clone();
+
     for thread_id in 0..cli.threads {
         let job_ref = current_job.clone();
         let submit_tx = submit_tx.clone();
         let run = running.clone();
+        let addr = miner_address.clone();
 
         tokio::spawn(async move {
             let mut nonce = thread_id as u64 * 1_000_000_000;
@@ -117,8 +122,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if hash_val <= job.share_target {
                         let submit = format!(
-                            r#"{{"type":"submit","job_id":{},"nonce":{},"thread":{}}}"#,
-                            job.job_id, nonce, thread_id
+                            r#"{{"type":"submit","job_id":{},"nonce":{},"thread":{},"address":"{}"}}"#,
+                            job.job_id, nonce, thread_id, addr
                         );
                         let _ = submit_tx.send(submit);
                     }

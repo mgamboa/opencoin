@@ -116,7 +116,12 @@ async fn run_node(
         bc.state.premine_remaining = config::PREMINE_AMOUNT;
     }
 
-    let wallet = Arc::new(RwLock::new(Some(Wallet::from_keypair(premine_kp, "premine"))));
+    let wallet = Arc::new(RwLock::new(Some({
+        let mut w = Wallet::from_keypair(premine_kp, "premine");
+        w.balance = config::PREMINE_AMOUNT;
+        w.transactions.push([0u8; 32]);
+        w
+    })));
     let p2p = Arc::new(P2PNetwork::new(p2p_port, blockchain.clone()));
 
     let pool_server: Option<Arc<PoolServer>> = if enable_pool {
