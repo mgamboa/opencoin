@@ -256,8 +256,17 @@ git clone https://github.com/mgamboa/opencoin.git
 cd opencoin
 cargo build --release
 
-# 4. Run
-./target/release/opencoin-node start --mine
+# 4. Run a node:
+./target/release/opencoin-node start --seed mail.laat.com.au:9768
+
+# Or run a mining node with your wallet:
+./target/release/opencoin-node start --seed mail.laat.com.au:9768 --mine --premine-key YOUR-SECRET-KEY
+
+# Or run a pool server:
+./target/release/opencoin-node start --seed mail.laat.com.au:9768 --pool --pool-port 3333 --premine-key YOUR-SECRET-KEY
+
+# Connect a miner to the pool:
+./target/release/opencoin-miner --pool mail.laat.com.au:3333 --address YOUR-OC-ADDRESS --threads 4
 ```
 
 ## Wallet Management
