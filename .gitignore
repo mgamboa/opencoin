@@ -1,3 +1,4 @@
 /target/
 *.json
 OPENCOIN_WALLET_*.txt
+SESSION-SUMMARY-*.md
