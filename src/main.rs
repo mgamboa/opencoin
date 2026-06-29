@@ -157,7 +157,7 @@ async fn run_node(
         w.transactions.push([0u8; 32]);
         w
     })));
-    let p2p = Arc::new(P2PNetwork::new(p2p_port, blockchain.clone()));
+    let p2p = Arc::new(P2PNetwork::new(p2p_port, blockchain.clone()).with_wallet(wallet.clone()));
 
     let pool_server: Option<Arc<PoolServer>> = if enable_pool {
         let pool_addr_stealth = match pool_address {

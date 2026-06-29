@@ -9,6 +9,7 @@ use log::{info, warn, error};
 use crate::chain::block::Block;
 use crate::chain::transaction::Transaction;
 use crate::chain::blockchain::Blockchain;
+use crate::wallet::Wallet;
 
 type PeerMap = HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>;
 
@@ -32,6 +33,7 @@ pub struct P2PNetwork {
     pub our_address: SocketAddr,
     pub known_peers: Arc<RwLock<Vec<SocketAddr>>>,
     pub blockchain: Arc<RwLock<Blockchain>>,
+    pub wallet: Option<Arc<RwLock<Option<Wallet>>>>,
 }
 
 impl P2PNetwork {
@@ -42,7 +44,13 @@ impl P2PNetwork {
             our_address: format!("0.0.0.0:{}", port).parse().unwrap(),
             known_peers: Arc::new(RwLock::new(Vec::new())),
             blockchain,
+            wallet: None,
         }
+    }
+
+    pub fn with_wallet(mut self, wallet: Arc<RwLock<Option<Wallet>>>) -> Self {
+        self.wallet = Some(wallet);
+        self
     }
 
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -139,6 +147,7 @@ impl P2PNetwork {
         let blockchain = self.blockchain.clone();
         let known_peers = self.known_peers.clone();
         let mempool = self.mempool.clone();
+        let wallet = self.wallet.clone();
         let our_addr = self.our_address;
 
         tokio::spawn(async move {
@@ -149,7 +158,7 @@ impl P2PNetwork {
                 match result {
                     Ok(Some(msg)) => {
                         let peers_snapshot = peers_clone.read().await.clone();
-                        handle_message2(msg, &addr, peers_snapshot, &blockchain, &known_peers, &mempool, our_addr).await;
+                        handle_message2(msg, &addr, peers_snapshot, &blockchain, &known_peers, &mempool, &wallet, our_addr).await;
                     }
                     Ok(None) => {
                         info!("Peer {} disconnected", addr);
@@ -237,6 +246,7 @@ async fn handle_message2(
     blockchain: &Arc<RwLock<Blockchain>>,
     known_peers: &Arc<RwLock<Vec<SocketAddr>>>,
     mempool: &Arc<RwLock<Vec<Transaction>>>,
+    wallet: &Option<Arc<RwLock<Option<Wallet>>>>,
     our_address: SocketAddr,
 ) {
     match msg {
@@ -254,9 +264,19 @@ async fn handle_message2(
             info!("Received block {} from {}: hash={}", block.header.height, addr, hex::encode(block.hash()));
             let mut bc = blockchain.write().await;
             let height = block.header.height;
+            let b = *block;
             if height > bc.state.height {
-                match bc.add_block(*block) {
-                    Ok(()) => info!("Added block {} from peer", height),
+                match bc.add_block(b.clone()) {
+                    Ok(()) => {
+                        info!("Added block {} from peer", height);
+                        drop(bc);
+                        if let Some(ref w) = wallet {
+                            let mut wallet_lock = w.write().await;
+                            if let Some(ref mut wlt) = *wallet_lock {
+                                wlt.scan_block(&b);
+                            }
+                        }
+                    }
                     Err(e) => warn!("Failed to add block from peer {}: {}", addr, e),
                 }
             }
@@ -282,11 +302,19 @@ async fn handle_message2(
             for block in blocks {
                 let height = block.header.height;
                 if height > bc.state.height {
-                    if let Err(e) = bc.add_block(block) {
+                    if let Err(e) = bc.add_block(block.clone()) {
                         warn!("Failed to add block {} from peer: {}", height, e);
                         break;
                     }
                     info!("Synced block {}", height);
+                    drop(bc);
+                    if let Some(ref w) = wallet {
+                        let mut wallet_lock = w.write().await;
+                        if let Some(ref mut wlt) = *wallet_lock {
+                            wlt.scan_block(&block);
+                        }
+                    }
+                    bc = blockchain.write().await;
                 }
             }
         }
