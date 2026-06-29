@@ -181,7 +181,7 @@ async fn run_node(
                 }
             }
         };
-        let pool = PoolServer::new(pool_port, pool_addr_stealth, blockchain.clone());
+        let pool = PoolServer::new(pool_port, pool_addr_stealth, blockchain.clone()).with_p2p(p2p.clone()).with_wallet(wallet.clone());
         let pool_arc = Arc::new(pool);
         info!("Pool server configured on port {}", pool_port);
         Some(pool_arc)

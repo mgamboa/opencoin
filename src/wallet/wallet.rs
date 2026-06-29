@@ -4,6 +4,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 use crate::crypto::keys::{KeyPair, PublicKey, SecretKey, generate_keypair, public_key_to_address};
 use crate::crypto::stealth::{StealthAddress, create_stealth_output, recover_stealth_output, OneTimeOutput};
 use crate::chain::transaction::{Transaction, TransactionType, TxInput, TxOutput};
+use crate::chain::block::Block;
 use crate::chain::address::OpenCoinAddress;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -106,6 +107,30 @@ impl Wallet {
             signatures: Vec::new(),
             memo: None,
         })
+    }
+
+    pub fn scan_block(&mut self, block: &Block) -> u64 {
+        let my_addr = match self.stealth_address() {
+            Ok(a) => a,
+            Err(_) => return 0,
+        };
+        let mut received = 0u64;
+        for tx in &block.transactions {
+            if !self.transactions.contains(&tx.hash()) {
+                for output in &tx.outputs {
+                    if output.stealth_address.spend_pub.0 == my_addr.spend_pub.0 {
+                        received += output.amount;
+                        if !self.transactions.contains(&tx.hash()) {
+                            self.transactions.push(tx.hash());
+                        }
+                    }
+                }
+            }
+        }
+        if received > 0 {
+            self.balance += received;
+        }
+        received
     }
 
     pub fn to_json(&self) -> String {

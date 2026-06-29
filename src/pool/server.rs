@@ -15,6 +15,8 @@ use crate::crypto::hash::merkle_root;
 use crate::crypto::stealth::StealthAddress;
 use crate::consensus::difficulty::{calculate_difficulty, difficulty_to_compact};
 use crate::consensus::pow::{calculate_target, check_pow};
+use crate::p2p::P2PNetwork;
+use crate::wallet::Wallet;
 
 pub const POOL_FEE_PERCENT: u64 = 2;
 
@@ -42,6 +44,8 @@ pub struct PoolServer {
     pub port: u16,
     pub pool_address: StealthAddress,
     pub blockchain: Arc<RwLock<Blockchain>>,
+    pub p2p: Option<Arc<P2PNetwork>>,
+    pub wallet: Option<Arc<RwLock<Option<Wallet>>>>,
     pub miners: Arc<RwLock<HashMap<SocketAddr, MinerInfo>>>,
     pub current_template: Arc<RwLock<Option<BlockTemplate>>>,
     pub job_counter: Arc<AtomicU64>,
@@ -56,6 +60,8 @@ impl PoolServer {
             port,
             pool_address,
             blockchain,
+            p2p: None,
+            wallet: None,
             miners: Arc::new(RwLock::new(HashMap::new())),
             current_template: Arc::new(RwLock::new(None)),
             job_counter: Arc::new(AtomicU64::new(1)),
@@ -63,6 +69,16 @@ impl PoolServer {
             running: Arc::new(AtomicBool::new(true)),
             round_shares: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    pub fn with_p2p(mut self, p2p: Arc<P2PNetwork>) -> Self {
+        self.p2p = Some(p2p);
+        self
+    }
+
+    pub fn with_wallet(mut self, wallet: Arc<RwLock<Option<Wallet>>>) -> Self {
+        self.wallet = Some(wallet);
+        self
     }
 
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -155,6 +171,7 @@ impl PoolServer {
         let blockchain = self.blockchain.clone();
         let total_shares = self.total_shares.clone();
         let pool_address = self.pool_address.clone();
+        let p2p = self.p2p.clone();
 
         {
             let mut m = miners.write().await;
@@ -189,6 +206,8 @@ impl PoolServer {
         let ct = self.current_template.clone();
         let bc2 = self.blockchain.clone();
         let round_shares = self.round_shares.clone();
+        let p2p = p2p.clone();
+        let wallet = self.wallet.clone();
 
         tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
@@ -304,6 +323,15 @@ impl PoolServer {
                                                         info!("Pool found block {}! Nonce: {}", t.height, nonce);
                                                         info!("Pool fee: {} ({}%), miners: {} OC distributed to {} miners", 
                                                             pool_fee, POOL_FEE_PERCENT, miner_total, rs_snapshot.len());
+                                                        if let Some(ref p) = p2p {
+                                                            p.broadcast_block(&block).await;
+                                                        }
+                                                        if let Some(ref w) = wallet {
+                                                            let mut wallet_lock = w.write().await;
+                                                            if let Some(ref mut wlt) = *wallet_lock {
+                                                                wlt.scan_block(&block);
+                                                            }
+                                                        }
                                                         let mut m = miners.write().await;
                                                         if let Some(info) = m.get_mut(&addr) {
                                                             info.valid_blocks += 1;
