@@ -277,9 +277,23 @@ cargo build --release
 ./target/release/opencoin-wallet validate OCabc123...
 ```
 
+### Wallet Recovery (⚠️ Critical)
+
+**Your wallet IS your secret key.** If your machine dies, you can recover everything from the hex key.
+
+```bash
+# Recover your wallet by starting a node with your secret key:
+./target/release/opencoin-node start --seed mail.laat.com.au:9768 --premine-key YOUR-64-BYTE-HEX-SECRET-KEY
+
+# Your balance, address, and transaction history will be restored.
+# The blockchain is synced from the network; your coins are on-chain.
+```
+
+**Save your secret key offline** (paper wallet, encrypted USB). Without it, your coins are gone forever.
+
 ### Address Format:
 
-Addresses start with `OC` followed by 60 hex chars (30 bytes blake3 hash + 4 bytes checksum).
+Addresses start with `OC` followed by 64 hex chars (32 bytes public key) + 8 hex chars (4 bytes checksum) — 74 characters total.
 
 ## Privacy Model
 
@@ -300,7 +314,7 @@ MIT
 - [x] Web dashboard + RPC
 - [x] Mining pool server
 - [x] Web wallet + pool dashboard
-- [ ] Block persistence (save/load chain from disk)
+- [x] Block persistence (save/load chain from disk)
 - [ ] WASM smart contracts
 - [ ] RingCT (confidential transactions)
 - [ ] Mobile wallet

@@ -177,6 +177,18 @@ opencoin-miner --pool mail.laat.com.au:3333 --address YOUR-OC-ADDRESS
 # Create a wallet:
 opencoin-wallet create --name my-wallet</pre>
 </div>
+<div class=card><h3>Wallet Recovery</h3>
+<p>Your wallet <strong>IS your secret key</strong>. Lose the machine, not the key.</p>
+<pre># Recover wallet from secret key:
+opencoin-node start --seed mail.laat.com.au:9768 --premine-key YOUR-SECRET-HEX-KEY
+
+# View your address and balance:
+opencoin-wallet show --name my-wallet
+
+# Generate a fresh keypair (SAVE THE SECRET KEY):
+opencoin-wallet generate-key</pre>
+<p><strong>⚠️ Save your secret key offline.</strong> Without it, your coins are gone forever.</p>
+</div>
 <div class=card><h3>Seed Node</h3>
 <table>
 <tr><td>P2P</td><td><code>mail.laat.com.au:9768</code></td></tr>
