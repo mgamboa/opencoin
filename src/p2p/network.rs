@@ -138,6 +138,7 @@ impl P2PNetwork {
         let peers_clone = self.peers.clone();
         let blockchain = self.blockchain.clone();
         let known_peers = self.known_peers.clone();
+        let mempool = self.mempool.clone();
         let our_addr = self.our_address;
 
         tokio::spawn(async move {
@@ -148,7 +149,7 @@ impl P2PNetwork {
                 match result {
                     Ok(Some(msg)) => {
                         let peers_snapshot = peers_clone.read().await.clone();
-                        handle_message2(msg, &addr, peers_snapshot, &blockchain, &known_peers, our_addr).await;
+                        handle_message2(msg, &addr, peers_snapshot, &blockchain, &known_peers, &mempool, our_addr).await;
                     }
                     Ok(None) => {
                         info!("Peer {} disconnected", addr);
@@ -235,6 +236,7 @@ async fn handle_message2(
     peers: HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>,
     blockchain: &Arc<RwLock<Blockchain>>,
     known_peers: &Arc<RwLock<Vec<SocketAddr>>>,
+    mempool: &Arc<RwLock<Vec<Transaction>>>,
     our_address: SocketAddr,
 ) {
     match msg {
@@ -318,6 +320,11 @@ async fn handle_message2(
         Message::MempoolResponse(_) => {}
         Message::Transaction(tx) => {
             info!("Received transaction from {}: {}", addr, hex::encode(tx.hash()));
+            let mut mp = mempool.write().await;
+            if !mp.iter().any(|t| t.hash() == tx.hash()) {
+                mp.push(*tx);
+                info!("Transaction added to mempool");
+            }
         }
     }
 }

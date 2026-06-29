@@ -113,10 +113,42 @@ async fn run_node(
         view_pub: premine_kp.public.clone(),
     };
 
-    let blockchain = Arc::new(RwLock::new(Blockchain::new(premine_stealth.clone())));
-    {
-        let mut bc = blockchain.write().await;
+    let storage_path = format!("{}/db", expanded_dir);
+    let storage = match Storage::new(&storage_path) {
+        Ok(s) => {
+            info!("Storage initialized at {}", storage_path);
+            Some(Arc::new(std::sync::Mutex::new(s)))
+        }
+        Err(e) => {
+            warn!("Storage initialization failed ({}), running without persistence", e);
+            None
+        }
+    };
+
+    let blockchain = if let Some(ref storage) = storage {
+        let s = storage.lock().unwrap();
+        match Blockchain::load_from_storage(&s, premine_stealth.clone())? {
+            Some(bc) => {
+                info!("Loaded blockchain from storage: height={}, blocks={}", bc.state.height, bc.blocks.len());
+                bc
+            }
+            None => {
+                info!("No existing blockchain found, starting fresh");
+                let mut bc = Blockchain::new(premine_stealth.clone());
+                bc.state.premine_remaining = config::PREMINE_AMOUNT;
+                bc
+            }
+        }
+    } else {
+        let mut bc = Blockchain::new(premine_stealth.clone());
         bc.state.premine_remaining = config::PREMINE_AMOUNT;
+        bc
+    };
+
+    let blockchain = Arc::new(RwLock::new(blockchain));
+    if let Some(ref storage) = storage {
+        let mut bc = blockchain.write().await;
+        bc.set_storage(storage.clone());
     }
 
     let wallet = Arc::new(RwLock::new(Some({
@@ -157,15 +189,10 @@ async fn run_node(
         None
     };
 
-    let rpc_server = RpcServer::new(blockchain.clone(), wallet.clone(), p2p.clone(), pool_server.clone(), rpc_port);
-
-    let _storage = if let Ok(s) = Storage::new(&format!("{}/db", expanded_dir)) {
-        info!("Storage initialized");
-        Some(s)
-    } else {
-        warn!("Storage initialization failed, running without persistence");
-        None
-    };
+    let mut rpc_server = RpcServer::new(blockchain.clone(), wallet.clone(), p2p.clone(), pool_server.clone(), rpc_port);
+    if let Some(ref storage) = storage {
+        rpc_server = rpc_server.with_storage(storage.clone());
+    }
 
     let seed_list: Vec<String> = {
         let mut s: Vec<String> = seeds.to_vec();

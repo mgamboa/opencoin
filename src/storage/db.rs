@@ -87,6 +87,24 @@ impl Storage {
         }
     }
 
+    pub fn get_blocks_since(&self, from_height: u64) -> Result<Vec<Block>, Box<dyn std::error::Error>> {
+        let state = match self.get_blockchain_state()? {
+            Some(s) => s,
+            None => return Ok(Vec::new()),
+        };
+        let mut blocks = Vec::with_capacity((state.height - from_height + 1) as usize);
+        for h in from_height..=state.height {
+            if let Some(block) = self.get_block(h)? {
+                blocks.push(block);
+            }
+        }
+        Ok(blocks)
+    }
+
+    pub fn get_all_blocks(&self) -> Result<Vec<Block>, Box<dyn std::error::Error>> {
+        self.get_blocks_since(0)
+    }
+
     pub fn flush(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.db.flush()?;
         Ok(())

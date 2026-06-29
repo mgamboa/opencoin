@@ -1,10 +1,12 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::sync::RwLock;
 
 use crate::chain::blockchain::Blockchain;
 use crate::wallet::Wallet;
 use crate::p2p::P2PNetwork;
 use crate::pool::PoolServer;
+use crate::storage::db::Storage;
 
 pub struct RpcServer {
     pub blockchain: Arc<RwLock<Blockchain>>,
@@ -12,6 +14,7 @@ pub struct RpcServer {
     pub p2p: Arc<P2PNetwork>,
     pub pool: Option<Arc<PoolServer>>,
     pub port: u16,
+    pub storage: Option<Arc<Mutex<Storage>>>,
 }
 
 impl RpcServer {
@@ -28,7 +31,13 @@ impl RpcServer {
             p2p,
             pool,
             port,
+            storage: None,
         }
+    }
+
+    pub fn with_storage(mut self, storage: Arc<Mutex<Storage>>) -> Self {
+        self.storage = Some(storage);
+        self
     }
 
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -40,6 +49,7 @@ impl RpcServer {
         let wallet = self.wallet.clone();
         let p2p = self.p2p.clone();
         let pool = self.pool.clone();
+        let storage = self.storage.clone();
 
         loop {
             let (stream, _peer) = listener.accept().await?;
@@ -47,9 +57,10 @@ impl RpcServer {
             let wallet = wallet.clone();
             let p2p = p2p.clone();
             let pool = pool.clone();
+            let storage = storage.clone();
 
             tokio::spawn(async move {
-                handle_connection(stream, blockchain, wallet, p2p, pool).await;
+                handle_connection(stream, blockchain, wallet, p2p, pool, storage).await;
             });
         }
     }
@@ -61,6 +72,7 @@ async fn handle_connection(
     wallet: Arc<RwLock<Option<Wallet>>>,
     p2p: Arc<P2PNetwork>,
     pool: Option<Arc<PoolServer>>,
+    storage: Option<Arc<Mutex<Storage>>>,
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -107,13 +119,14 @@ async fn handle_connection(
         ("GET", "/wallet") => html_page("OpenCoin Wallet", &wallet_html(&wallet).await),
         ("GET", "/pool") => html_page("OpenCoin Pool", &pool_html(&pool).await),
         ("GET", "/blocks") => html_page("OpenCoin Blocks", &blocks_html(&blockchain).await),
+        ("GET", "/download") => html_page("OpenCoin Download", DOWNLOAD_HTML),
         ("POST", "/") | ("POST", "/rpc") | ("POST", "/api") => {
-            let response = match serde_json::from_str::<serde_json::Value>(&body) {
+                    let response = match serde_json::from_str::<serde_json::Value>(&body) {
                 Ok(req) => {
                     let method = req["method"].as_str().unwrap_or("");
                     let params = req["params"].as_array().cloned().unwrap_or_default();
                     let id = req["id"].clone();
-                    handle_rpc_request(method, &params, &id, &blockchain, &wallet, &p2p, &pool).await
+                    handle_rpc_request(method, &params, &id, &blockchain, &wallet, &p2p, &pool, &storage).await
                 }
                 Err(_) => {
                     serde_json::json!({
@@ -140,6 +153,38 @@ async fn handle_connection(
 
     let _ = stream.write_all(response.as_bytes()).await;
 }
+
+const DOWNLOAD_HTML: &str = r##"
+<div class=card><h2>Download OpenCoin</h2>
+<p>Build from source or download pre-built binaries.</p></div>
+<div class=card><h3>Source Code</h3>
+<pre>git clone https://github.com/mgamboa/opencoin.git
+cd opencoin
+cargo build --release
+sudo cp target/release/opencoin-{node,wallet,miner} /usr/local/bin/</pre>
+<p>Requires Rust: <code>curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh</code></p>
+</div>
+<div class=card><h3>Quick Start (Join Network)</h3>
+<pre># Start a node that connects to the seed:
+opencoin-node start --seed mail.laat.com.au:9768
+
+# Start a mining node (earns block rewards):
+opencoin-node start --seed mail.laat.com.au:9768 --mine --premine-key YOUR-SECRET-KEY
+
+# Connect miner to pool:
+opencoin-miner --pool 192.168.2.10:3333 --address YOUR-OC-ADDRESS
+
+# Create a wallet:
+opencoin-wallet create --name my-wallet</pre>
+</div>
+<div class=card><h3>Seed Node</h3>
+<table>
+<tr><td>P2P</td><td><code>mail.laat.com.au:9768</code></td></tr>
+<tr><td>RPC (Web)</td><td><code>http://mail.laat.com.au:9769</code></td></tr>
+<tr><td>Pool</td><td><code>192.168.2.10:3333</code></td></tr>
+</table>
+</div>
+"##;
 
 fn html_page(title: &str, content: &str) -> String {
     format!(
@@ -170,6 +215,7 @@ th{{color:#0a0}}
 <a href="/wallet">Wallet</a>
 <a href="/blocks">Blocks</a>
 <a href="/pool">Pool</a>
+<a href="/download">Download</a>
 </div>
 <h1>{}</h1>
 {}</body></html>"##,
@@ -223,28 +269,57 @@ async fn wallet_html(wallet: &Arc<RwLock<Option<Wallet>>>) -> String {
             let bal = wallet_data.balance;
             let locked = wallet_data.locked_balance;
             format!(
-                "<div class=card><h2>Wallet</h2>\
-<table>\
-<tr><td>Address</td><td style=font-size:11px;word-break:break-all>{addr}</td></tr>\
-<tr><td>Balance</td><td id=balance>{bal} OC</td></tr>\
-<tr><td>Locked</td><td id=locked>{locked} OC</td></tr>\
-</table></div>\
-<script>\
-async function refresh(){{\
-try{{\
-let r=await fetch('/rpc',{{method:'POST',headers:{{'Content-Type':'application/json'}},\
-body:JSON.stringify({{jsonrpc:'2.0',method:'getbalance',params:[],id:1}})}});\
-let d=await r.json();\
-document.getElementById('balance').textContent=d.result.balance+' OC';\
-document.getElementById('locked').textContent=d.result.locked+' OC';\
-}}catch(e){{}}\
-}}\
-setInterval(refresh,2000);refresh();\
-</script>"
+                r##"<div class=card><h2>Wallet</h2>
+<table>
+<tr><td>Address</td><td style=font-size:11px;word-break:break-all>{addr}</td></tr>
+<tr><td>Balance</td><td id=balance>{bal} OC</td></tr>
+<tr><td>Locked</td><td id=locked>{locked} OC</td></tr>
+</table></div>
+<div class=card><h2>Send Coins</h2>
+<form id=sendForm onsubmit="sendCoins(event)">
+<table>
+<tr><td>Recipient Address:</td><td><input id=toAddress style="width:100%;font-family:monospace" placeholder="OC..."></td></tr>
+<tr><td>Amount (OC):</td><td><input id=sendAmount type=number step=1 min=1 style="width:100%"></td></tr>
+<tr><td></td><td><button type=submit style="background:#0f0;color:#000;border:none;padding:8px 20px;cursor:pointer;font-weight:bold;border-radius:4px">SEND</button></td></tr>
+</table>
+</form>
+<pre id=sendResult style="margin-top:10px;color:#0f0"></pre>
+</div>
+<script>
+async function refresh(){{
+try{{
+let r=await fetch('/rpc',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+body:JSON.stringify({{jsonrpc:'2.0',method:'getbalance',params:[],id:1}})}});
+let d=await r.json();
+document.getElementById('balance').textContent=d.result.balance+' OC';
+document.getElementById('locked').textContent=d.result.locked+' OC';
+}}catch(e){{}}
+}}
+async function sendCoins(e){{
+e.preventDefault();
+const addr=document.getElementById('toAddress').value.trim();
+const amt=parseInt(document.getElementById('sendAmount').value);
+if(!addr||!amt){{document.getElementById('sendResult').textContent='Fill in all fields';return;}}
+try{{
+let r=await fetch('/rpc',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+body:JSON.stringify({{jsonrpc:'2.0',method:'sendtoaddress',params:[addr,amt],id:1}})}});
+let d=await r.json();
+if(d.result.error){{
+document.getElementById('sendResult').textContent='Error: '+d.result.error;
+}}else{{
+document.getElementById('sendResult').innerHTML='✅ Sent '+amt+' OC<br>TX: <span style=font-size:11px>'+d.result.tx_hash+'</span>';
+document.getElementById('sendAmount').value='';
+document.getElementById('toAddress').value='';
+refresh();
+}}
+}}catch(e){{document.getElementById('sendResult').textContent='Request failed: '+e;}}
+}}
+setInterval(refresh,2000);refresh();
+</script>"##
             )
         }
         None => {
-            "<div class=card><h2>Wallet</h2><p>No wallet loaded</p></div>".to_string()
+            "<div class=card><h2>Wallet</h2><p>No wallet loaded. Start node with --premine-key to load wallet.</p></div>".to_string()
         }
     }
 }
@@ -340,8 +415,9 @@ async fn handle_rpc_request(
     id: &serde_json::Value,
     blockchain: &Arc<RwLock<Blockchain>>,
     wallet: &Arc<RwLock<Option<Wallet>>>,
-    _p2p: &Arc<P2PNetwork>,
+    p2p: &Arc<P2PNetwork>,
     pool: &Option<Arc<PoolServer>>,
+    storage: &Option<Arc<Mutex<Storage>>>,
 ) -> serde_json::Value {
     let result = match method {
         "getinfo" => {
@@ -386,6 +462,60 @@ async fn handle_rpc_request(
                 serde_json::json!({"address": wallet.address_string().unwrap_or_default()})
             } else {
                 serde_json::json!({"error": "No wallet loaded"})
+            }
+        }
+        "sendtoaddress" => {
+            let to_address = params.get(0).and_then(|p| p.as_str()).unwrap_or("").to_string();
+            let amount = params.get(1).and_then(|p| p.as_u64()).unwrap_or(0);
+            let fee = params.get(2).and_then(|p| p.as_u64()).unwrap_or(crate::config::COIN / 1000);
+
+            if to_address.is_empty() || amount == 0 {
+                serde_json::json!({"error": "Invalid parameters: need address and amount"})
+            } else if let Ok(oc_addr) = crate::chain::address::OpenCoinAddress::from_string(&to_address) {
+                let w = wallet.read().await;
+                if let Some(w_ref) = w.as_ref() {
+                    if amount + fee > w_ref.balance {
+                        serde_json::json!({"error": "Insufficient balance"})
+                    } else {
+                        let sender_stealth = w_ref.stealth_address().unwrap();
+                        let recipient_stealth = oc_addr.to_stealth();
+                        let change = w_ref.balance - amount - fee;
+                        let tx = crate::chain::transaction::Transaction::transfer(
+                            &sender_stealth, &recipient_stealth, amount, fee, change
+                        );
+                        let tx_hash = tx.hash();
+                        drop(w);
+
+                        let mut w = wallet.write().await;
+                        if let Some(ref mut wallet) = *w {
+                            wallet.balance = wallet.balance.saturating_sub(amount + fee);
+                            wallet.transactions.push(tx_hash);
+                        }
+                        drop(w);
+
+                        p2p.broadcast_transaction(&tx).await;
+                        let _ = p2p.add_to_mempool(tx.clone()).await;
+
+                        if let Some(ref st) = storage {
+                            if let Ok(s) = st.lock() {
+                                let _ = s.save_transaction(&tx);
+                                let _ = s.flush();
+                            }
+                        }
+
+                        serde_json::json!({
+                            "tx_hash": hex::encode(tx_hash),
+                            "amount": amount,
+                            "fee": fee,
+                            "to": to_address,
+                            "change": change,
+                        })
+                    }
+                } else {
+                    serde_json::json!({"error": "No wallet loaded"})
+                }
+            } else {
+                serde_json::json!({"error": format!("Invalid address: {}", to_address)})
             }
         }
         "getpoolstats" => {

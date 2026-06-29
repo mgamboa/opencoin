@@ -58,6 +58,48 @@ impl Transaction {
         }
     }
 
+    pub fn transfer(
+        sender: &StealthAddress,
+        recipient: &StealthAddress,
+        amount: u64,
+        fee: u64,
+        change: u64,
+    ) -> Self {
+        let (out_recipient, _) = crate::crypto::stealth::create_stealth_output(recipient, amount);
+        let mut outputs = vec![
+            TxOutput {
+                stealth_address: recipient.clone(),
+                one_time_output: out_recipient,
+                amount,
+                view_key_proof: None,
+            },
+        ];
+        if change > 0 {
+            let (out_change, _) = crate::crypto::stealth::create_stealth_output(sender, change);
+            outputs.push(TxOutput {
+                stealth_address: sender.clone(),
+                one_time_output: out_change,
+                amount: change,
+                view_key_proof: None,
+            });
+        }
+        Transaction {
+            version: 1,
+            tx_type: TransactionType::Transfer,
+            inputs: Vec::new(),
+            outputs,
+            fee,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            signatures: Vec::new(),
+            memo: Some(format!("Transfer {} OC to {}", 
+                amount as f64 / crate::config::COIN as f64,
+                hex::encode(&recipient.spend_pub.0[..8]))),
+        }
+    }
+
     pub fn coinbase_multi_output(recipients: &[(StealthAddress, u64)]) -> Self {
         let mut outputs = Vec::with_capacity(recipients.len());
         for (addr, amount) in recipients {

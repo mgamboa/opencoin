@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::config;
 use crate::consensus::pow::check_pow;
@@ -7,6 +8,7 @@ use crate::chain::block::{is_genesis_block, Block, calculate_block_reward};
 use crate::chain::transaction::{Transaction, TransactionType};
 use crate::crypto::hash::merkle_root;
 use crate::crypto::stealth::StealthAddress;
+use crate::storage::db::Storage;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockchainState {
@@ -22,6 +24,7 @@ pub struct Blockchain {
     pub utxo_set: HashMap<String, Transaction>,
     pub state: BlockchainState,
     pub premine_address: StealthAddress,
+    pub storage: Option<Arc<std::sync::Mutex<Storage>>>,
 }
 
 impl Blockchain {
@@ -41,6 +44,7 @@ impl Blockchain {
                 circulating_supply: 0,
             },
             premine_address,
+            storage: None,
         };
 
         bc.state.current_hash = bc.blocks[0].hash();
@@ -48,11 +52,48 @@ impl Blockchain {
         bc
     }
 
+    pub fn set_storage(&mut self, storage: Arc<std::sync::Mutex<Storage>>) {
+        self.storage = Some(storage);
+    }
+
     fn add_premine(&mut self) {
         if self.state.premine_remaining > 0 {
             self.state.circulating_supply += self.state.premine_remaining;
             self.state.premine_remaining = 0;
         }
+    }
+
+    pub fn load_from_storage(storage: &Storage, premine_address: StealthAddress) -> Result<Option<Self>, Box<dyn std::error::Error>> {
+        let state = match storage.get_blockchain_state()? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let blocks = storage.get_all_blocks()?;
+        if blocks.is_empty() {
+            return Ok(None);
+        }
+        let mut utxo_set = HashMap::new();
+        for block in &blocks {
+            for tx in &block.transactions {
+                if tx.tx_type != TransactionType::Coinbase {
+                    utxo_set.insert(hex::encode(tx.hash()), tx.clone());
+                }
+            }
+        }
+        let current_hash = blocks.last().map(|b| b.hash()).unwrap_or([0u8; 32]);
+        Ok(Some(Blockchain {
+            blocks,
+            utxo_set,
+            state: BlockchainState {
+                height: state.height,
+                current_hash,
+                total_work: state.total_work,
+                premine_remaining: state.premine_remaining,
+                circulating_supply: state.circulating_supply,
+            },
+            premine_address,
+            storage: None,
+        }))
     }
 
     pub fn add_block(&mut self, block: Block) -> Result<(), &'static str> {
@@ -104,6 +145,14 @@ impl Blockchain {
         for tx in &block.transactions {
             if tx.tx_type != TransactionType::Coinbase {
                 self.utxo_set.insert(hex::encode(tx.hash()), tx.clone());
+            }
+        }
+
+        if let Some(ref storage) = self.storage {
+            if let Ok(s) = storage.lock() {
+                let _ = s.save_block(&block);
+                let _ = s.save_blockchain_state(&self.state);
+                let _ = s.flush();
             }
         }
 
