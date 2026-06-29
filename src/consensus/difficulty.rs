@@ -51,7 +51,9 @@ pub fn compact_to_target(compact: u32) -> u64 {
     let exponent = compact >> 24;
     let mantissa = compact & 0x00ffffff;
     if exponent <= 3 {
-        mantissa as u64 >> (3 - exponent) * 8
+        (mantissa as u64) >> ((3 - exponent) * 8)
+    } else if exponent > 11 {
+        u64::MAX
     } else {
         (mantissa as u64) << ((exponent - 3) * 8)
     }
