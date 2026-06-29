@@ -412,14 +412,23 @@ async fn pool_html(pool: &Option<Arc<PoolServer>>) -> String {
             let miners = stats["miners"].as_u64().unwrap_or(0);
             let total_shares = stats["total_shares"].as_u64().unwrap_or(0);
             let job = &stats["current_job"];
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
             let miner_list = stats["miner_list"].as_array().cloned().unwrap_or_default();
             let mut miner_rows = String::new();
             for m in miner_list {
+                let last_share = m["last_share"].as_u64().unwrap_or(0);
+                let secs_ago = now.saturating_sub(last_share);
+                let status = if secs_ago < 30 { "🟢" } else if secs_ago < 120 { "🟡" } else { "🔴" };
+                let wallet = m["wallet"].as_str().unwrap_or("").to_string();
+                let wallet_short = if wallet.len() > 16 { format!("{}...", &wallet[..16]) } else { wallet };
                 miner_rows.push_str(&format!(
-                    "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
-                    m["address"].as_str().unwrap_or(""),
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}s ago</td></tr>",
+                    status,
+                    wallet_short,
                     m["shares"].as_u64().unwrap_or(0),
                     m["blocks_found"].as_u64().unwrap_or(0),
+                    secs_ago,
                 ));
             }
             format!(
@@ -434,7 +443,7 @@ async fn pool_html(pool: &Option<Arc<PoolServer>>) -> String {
 </table></div>
 <div class=card><h2>Miners ({miner_count})</h2>
 <table>
-<tr><th>Address</th><th>Shares</th><th>Blocks Found</th></tr>
+<tr><th>Status</th><th>Address</th><th>Shares</th><th>Blocks</th><th>Last Share</th></tr>
 {miner_rows}</table></div>
 <script>
 async function refresh(){{
