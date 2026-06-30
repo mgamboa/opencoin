@@ -79,3 +79,15 @@ export async function getBlock(height) {
 export async function getBlockCount() {
   return rpcCall('getblockcount');
 }
+
+export async function sendRawTransaction(txHex) {
+  return rpcCall('sendrawtransaction', [txHex]);
+}
+
+export async function getAddressBalance(pubkeyHex) {
+  return rpcCall('getaddressbalance', [pubkeyHex]);
+}
+
+export async function sendWithKey(secretHex, toAddress, amount, fee) {
+  return rpcCall('sendwithkey', [secretHex, toAddress, amount, fee || 10]);
+}

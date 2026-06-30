@@ -1,21 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
 import QRCode from 'react-native-qrcode-svg';
-import { getAddress } from '../services/rpc';
+import { loadWallet } from '../services/localwallet';
 
 export default function ReceiveScreen() {
   const [address, setAddress] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
 
   useEffect(() => {
     (async () => {
-      try {
-        const result = await getAddress();
-        setAddress(result.address);
-      } catch (e) {
-        setError(e.message);
-      }
+      const w = await loadWallet();
+      if (w) setAddress(w.address);
       setLoading(false);
     })();
   }, []);
@@ -24,14 +19,6 @@ export default function ReceiveScreen() {
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color="#f7931a" />
-      </View>
-    );
-  }
-
-  if (error) {
-    return (
-      <View style={styles.centered}>
-        <Text style={styles.errorText}>{error}</Text>
       </View>
     );
   }
@@ -45,7 +32,7 @@ export default function ReceiveScreen() {
         )}
       </View>
       <Text style={styles.addressLabel}>Your Address</Text>
-      <Text style={styles.address} selectable>{address}</Text>
+      <Text style={styles.address} selectable>{address || 'No wallet'}</Text>
       <Text style={styles.hint}>Share this address to receive payments</Text>
     </View>
   );
@@ -59,5 +46,4 @@ const styles = StyleSheet.create({
   addressLabel: { color: '#8b949e', fontSize: 14, marginTop: 24, marginBottom: 8 },
   address: { color: '#58a6ff', fontSize: 13, fontFamily: 'monospace', textAlign: 'center', padding: 12, backgroundColor: '#161b22', borderRadius: 8, borderWidth: 1, borderColor: '#30363d', width: '100%' },
   hint: { color: '#8b949e', fontSize: 13, marginTop: 16, textAlign: 'center' },
-  errorText: { color: '#f85149', fontSize: 16, textAlign: 'center' },
 });

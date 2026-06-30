@@ -3,12 +3,12 @@ import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ScrollView,
   ActivityIndicator,
 } from 'react-native';
-import { sendCoins } from '../services/wallet';
+import { sendFromWallet } from '../services/localwallet';
 
 export default function SendScreen({ navigation }) {
   const [address, setAddress] = useState('');
   const [amount, setAmount] = useState('');
-  const [fee, setFee] = useState('0.001');
+  const [fee, setFee] = useState('0.00000010');
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState(null);
 
@@ -22,10 +22,10 @@ export default function SendScreen({ navigation }) {
       Alert.alert('Error', 'Enter a valid amount');
       return;
     }
-    const feeInt = Math.round(parseFloat(fee || '0.001') * 1e8);
+    const feeInt = Math.round(parseFloat(fee || '0.00000010') * 1e8);
     setSending(true);
     setResult(null);
-    const res = await sendCoins(address.trim(), amountInt, feeInt);
+    const res = await sendFromWallet(address.trim(), amountInt, feeInt);
     setSending(false);
     if (res.success) {
       setResult({ success: true, txHash: res.txHash });
@@ -41,7 +41,7 @@ export default function SendScreen({ navigation }) {
         style={styles.input}
         value={address}
         onChangeText={setAddress}
-        placeholder="oc1..."
+        placeholder="OC..."
         placeholderTextColor="#484f58"
         autoCapitalize="none"
         autoCorrect={false}
@@ -60,7 +60,7 @@ export default function SendScreen({ navigation }) {
         style={styles.input}
         value={fee}
         onChangeText={setFee}
-        placeholder="0.001"
+        placeholder="0.00000010"
         placeholderTextColor="#484f58"
         keyboardType="decimal-pad"
       />

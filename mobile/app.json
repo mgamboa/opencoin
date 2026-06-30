@@ -38,7 +38,8 @@
           }
         }
       ],
-      "./with-cleartext-traffic.js"
+      "./with-cleartext-traffic.js",
+      "expo-secure-store"
     ]
   }
 }

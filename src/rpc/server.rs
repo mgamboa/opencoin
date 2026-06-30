@@ -775,10 +775,10 @@ async fn faucet_html(wallet: &Arc<RwLock<Option<Wallet>>>) -> String {
             let bal = wallet_data.balance;
             format!(
                 r##"<div class=card><h2>OpenCoin Faucet</h2>
-<p>Get free test coins to try the network. Limited to 100 OC per request.</p>
+<p>Get free test coins to try the network. Limited to 1000 per request.</p>
 <table>
 <tr><td>Faucet Balance</td><td id=faucet-bal>{bal} OC</td></tr>
-<tr><td>Max per request</td><td>100 OC</td></tr>
+<tr><td>Max per request</td><td>1000</td></tr>
 </table></div>
 <div class=card><h2>Request Coins</h2>
 <form onsubmit="faucetSend(event)">
@@ -795,13 +795,13 @@ const addr=document.getElementById('faucetAddr').value.trim();
 if(!addr){{document.getElementById('faucetResult').textContent='Enter an address';return;}}
 try{{
 let r=await fetch('/rpc',{{method:'POST',headers:{{'Content-Type':'application/json'}},
-body:JSON.stringify({{jsonrpc:'2.0',method:'sendtoaddress',params:[addr,100],id:1}})}});
+body:JSON.stringify({{jsonrpc:'2.0',method:'sendtoaddress',params:[addr,1000,10],id:1}})}});
 let d=await r.json();
 if(d.result.error){{
 document.getElementById('faucetResult').textContent='Error: '+d.result.error;
 }}else{{
-document.getElementById('faucetResult').innerHTML='✅ Sent 100 OC!<br>TX: <span style=font-size:11px>'+d.result.tx_hash+'</span>';
-document.getElementById('faucet-bal').textContent=(parseInt(document.getElementById('faucet-bal').textContent)-100)+' OC';
+document.getElementById('faucetResult').innerHTML='✅ Sent 1000 units!<br>TX: <span style=font-size:11px>'+d.result.tx_hash+'</span>';
+document.getElementById('faucet-bal').textContent=(parseInt(document.getElementById('faucet-bal').textContent)-1010)+' OC';
 }}
 }}catch(e){{document.getElementById('faucetResult').textContent='Request failed: '+e;}}
 }}
@@ -819,8 +819,8 @@ async fn faucet_send(wallet: &Arc<RwLock<Option<Wallet>>>, to_addr: &str) -> Str
     match w.as_ref() {
         Some(w_ref) => {
             let bal = w_ref.balance;
-            if bal < 100 {
-                return "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><p>Faucet empty. Balance: {bal} OC</p><a href=/faucet>← Back</a></body></html>".to_string();
+            if bal < 1010 {
+                return format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><p>Faucet empty. Balance: {} OC</p><a href=/faucet>← Back</a></body></html>", bal);
             }
             if to_addr.is_empty() || !to_addr.starts_with("OC") || to_addr.len() != 74 {
                 return "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><p>Invalid address. Must be a valid OC address (74 chars starting with OC).</p><a href=/faucet>← Back</a></body></html>".to_string();
@@ -895,7 +895,7 @@ async fn handle_rpc_request(
         "sendtoaddress" => {
             let to_address = params.get(0).and_then(|p| p.as_str()).unwrap_or("").to_string();
             let amount = params.get(1).and_then(|p| p.as_u64()).unwrap_or(0);
-            let fee = params.get(2).and_then(|p| p.as_u64()).unwrap_or(crate::config::COIN / 10000);
+            let fee = params.get(2).and_then(|p| p.as_u64()).unwrap_or(10);
 
             if to_address.is_empty() || amount == 0 {
                 serde_json::json!({"error": "Invalid parameters: need address and amount"})
@@ -1317,6 +1317,127 @@ async fn handle_rpc_request(
                 }
             }
             serde_json::json!({"blocks": blocks, "start": start, "count": blocks.len(), "total": bc.state.height + 1})
+        }
+        "getaddressbalance" => {
+            let pubkey_hex = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
+            let pubkey_bytes = match hex::decode(pubkey_hex) {
+                Ok(b) if b.len() == 32 => {
+                    let mut key = [0u8; 32];
+                    key.copy_from_slice(&b);
+                    key
+                }
+                _ => return serde_json::json!({"error": "Invalid public key hex (expected 32 bytes)"}),
+            };
+            let my_addr = crate::crypto::stealth::StealthAddress {
+                spend_pub: crate::crypto::keys::PublicKey(pubkey_bytes),
+                view_pub: crate::crypto::keys::PublicKey(pubkey_bytes),
+            };
+            let bc = blockchain.read().await;
+            let mut utxos: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+            for h in 0..=bc.state.height {
+                if let Some(block) = bc.get_block(h) {
+                    for tx in &block.transactions {
+                        for (i, output) in tx.outputs.iter().enumerate() {
+                            if output.stealth_address.spend_pub.0 == my_addr.spend_pub.0 {
+                                let key = format!("{}:{}", hex::encode(tx.hash()), i);
+                                utxos.insert(key, output.amount);
+                            }
+                        }
+                        for input in &tx.inputs {
+                            let spent_key = format!("{}:{}", hex::encode(input.outpoint.tx_hash), input.outpoint.index);
+                            utxos.remove(&spent_key);
+                        }
+                    }
+                }
+            }
+            let balance: u64 = utxos.values().sum();
+            let address = crate::crypto::keys::public_key_to_address(&crate::crypto::keys::PublicKey(pubkey_bytes));
+            serde_json::json!({
+                "address": address,
+                "balance": balance,
+                "utxo_count": utxos.len(),
+                "pubkey": pubkey_hex,
+            })
+        }
+        "sendwithkey" => {
+            let secret_hex = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
+            let to_address = params.get(1).and_then(|p| p.as_str()).unwrap_or("").to_string();
+            let amount = params.get(2).and_then(|p| p.as_u64()).unwrap_or(0);
+            let fee = params.get(3).and_then(|p| p.as_u64()).unwrap_or(10);
+
+            let secret_bytes = match hex::decode(secret_hex) {
+                Ok(b) if b.len() == 32 => {
+                    let mut key = [0u8; 32];
+                    key.copy_from_slice(&b);
+                    key
+                }
+                _ => return serde_json::json!({"error": "Invalid secret key hex (expected 32 bytes)"}),
+            };
+            let sec_key = match crate::crypto::keys::SecretKey::from_bytes(&secret_bytes) {
+                Ok(k) => k,
+                Err(e) => return serde_json::json!({"error": e}),
+            };
+            let sender_kp = crate::crypto::keys::KeyPair::from_secret_key(&sec_key);
+            let my_addr = crate::crypto::stealth::StealthAddress {
+                spend_pub: sender_kp.public.clone(),
+                view_pub: sender_kp.public.clone(),
+            };
+
+            if to_address.is_empty() || amount == 0 {
+                serde_json::json!({"error": "Invalid parameters: need address and amount"})
+            } else if let Ok(oc_addr) = crate::chain::address::OpenCoinAddress::from_string(&to_address) {
+                let bc = blockchain.read().await;
+                let mut utxos: Vec<(crate::chain::transaction::OutPoint, u64)> = Vec::new();
+                for h in 0..=bc.state.height {
+                    if let Some(block) = bc.get_block(h) {
+                        for tx in &block.transactions {
+                            for (i, output) in tx.outputs.iter().enumerate() {
+                                if output.stealth_address.spend_pub.0 == my_addr.spend_pub.0 {
+                                    utxos.push((
+                                        crate::chain::transaction::OutPoint { tx_hash: tx.hash(), index: i as u32 },
+                                        output.amount,
+                                    ));
+                                }
+                            }
+                            for input in &tx.inputs {
+                                utxos.retain(|(op, _)| {
+                                    op.tx_hash != input.outpoint.tx_hash || op.index != input.outpoint.index
+                                });
+                            }
+                        }
+                    }
+                }
+                let total_balance: u64 = utxos.iter().map(|(_, a)| a).sum();
+                let needed = amount + fee;
+                if needed > total_balance {
+                    return serde_json::json!({"error": format!("Insufficient balance: have {}, need {}", total_balance, needed)});
+                }
+                let recipient_stealth = oc_addr.to_stealth();
+                drop(bc);
+
+                let tx = crate::chain::transaction::Transaction::transfer(
+                    &sender_kp, &recipient_stealth, amount, fee, &utxos
+                );
+                let tx_hash = tx.hash();
+
+                p2p.broadcast_transaction(&tx).await;
+                let _ = p2p.add_to_mempool(tx.clone()).await;
+                if let Some(ref st) = storage {
+                    if let Ok(s) = st.lock() {
+                        let _ = s.save_transaction(&tx);
+                        let _ = s.flush();
+                    }
+                }
+                serde_json::json!({
+                    "tx_hash": hex::encode(tx_hash),
+                    "amount": amount,
+                    "fee": fee,
+                    "to": to_address,
+                    "change": total_balance - amount - fee,
+                })
+            } else {
+                serde_json::json!({"error": format!("Invalid address: {}", to_address)})
+            }
         }
         "getmempoolinfo" => {
             let mempool = p2p.mempool.read().await;
