@@ -45,6 +45,10 @@ path = "src/bin/wallet.rs"
 name = "opencoin-miner"
 path = "src/bin/miner.rs"
 
+[[bin]]
+name = "opencoin-light"
+path = "src/bin/light.rs"
+
 [profile.release]
 opt-level = 3
 lto = true

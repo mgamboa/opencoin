@@ -6,9 +6,10 @@ use tokio::sync::{RwLock, mpsc};
 use serde::{Deserialize, Serialize};
 use log::{info, warn, error};
 
-use crate::chain::block::Block;
+use crate::chain::block::{Block, BlockHeader};
 use crate::chain::transaction::Transaction;
 use crate::chain::blockchain::Blockchain;
+use crate::crypto::bloom::BloomFilter;
 use crate::wallet::Wallet;
 use crate::storage::db::Storage;
 
@@ -24,6 +25,16 @@ pub enum Message {
     Peers(Vec<SocketAddr>),
     MempoolRequest,
     MempoolResponse(Vec<Transaction>),
+    GetHeaders(u64),
+    Headers(Vec<BlockHeader>),
+    GetMerkleBlock { height: u64, filter: BloomFilter },
+    MerkleBlock {
+        block_height: u64,
+        merkle_root: [u8; 32],
+        tx_hashes: Vec<[u8; 32]>,
+        matching_indices: Vec<usize>,
+        merkle_proofs: Vec<Vec<[u8; 32]>>,
+    },
 }
 
 pub struct P2PNetwork {
@@ -248,12 +259,12 @@ impl P2PNetwork {
     }
 }
 
-fn encode_length_prefixed(data: &[u8]) -> Vec<u8> {
+pub fn encode_length_prefixed(data: &[u8]) -> Vec<u8> {
     let len = (data.len() as u32).to_le_bytes();
     [&len, data].concat()
 }
 
-async fn read_message_inner<R>(read_half: &mut R) -> Result<Option<Message>, Box<dyn std::error::Error + Send + Sync>>
+pub async fn read_message_inner<R>(read_half: &mut R) -> Result<Option<Message>, Box<dyn std::error::Error + Send + Sync>>
 where
     R: tokio::io::AsyncReadExt + Unpin + Send,
 {
@@ -419,6 +430,69 @@ async fn handle_message2(
                 }
             }
             info!("Received {} mempool transactions from {}", mp.len(), addr);
+        }
+        Message::GetHeaders(from_height) => {
+            let bc = blockchain.read().await;
+            let headers: Vec<BlockHeader> = bc.blocks.iter()
+                .filter(|b| b.header.height >= from_height)
+                .take(500)
+                .map(|b| b.header.clone())
+                .collect();
+            if let Some(tx) = peers.get(addr) {
+                let resp = bincode::serialize(&Message::Headers(headers)).unwrap();
+                let _ = tx.send(encode_length_prefixed(&resp));
+            }
+        }
+        Message::Headers(headers) => {
+            let bc = blockchain.read().await;
+            let new_count = headers.iter().filter(|h| {
+                !bc.blocks.iter().any(|b| b.header.height == h.height)
+            }).count();
+            info!("Received {} headers ({} new) from {}", headers.len(), new_count, addr);
+        }
+        Message::GetMerkleBlock { height, filter } => {
+            let bc = blockchain.read().await;
+            if let Some(block) = bc.blocks.iter().find(|b| b.header.height == height) {
+                let tx_hashes: Vec<[u8; 32]> = block.transactions.iter().map(|tx| tx.hash()).collect();
+                let matching_indices: Vec<usize> = block.transactions.iter().enumerate()
+                    .filter(|(_, tx)| {
+                        filter.matches(&tx.hash()) || tx.outputs.iter().any(|o| {
+                            filter.matches(&o.stealth_address.spend_pub.0) ||
+                            filter.matches(&o.stealth_address.view_pub.0)
+                        })
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                let merkle_proofs: Vec<Vec<[u8; 32]>> = matching_indices.iter()
+                    .map(|&i| crate::crypto::hash::merkle_proof(&tx_hashes, i))
+                    .collect();
+                if let Some(tx) = peers.get(addr) {
+                    let resp = bincode::serialize(&Message::MerkleBlock {
+                        block_height: height,
+                        merkle_root: block.header.merkle_root,
+                        tx_hashes,
+                        matching_indices,
+                        merkle_proofs,
+                    }).unwrap();
+                    let _ = tx.send(encode_length_prefixed(&resp));
+                }
+            }
+        }
+        Message::MerkleBlock { block_height, merkle_root, tx_hashes, matching_indices, merkle_proofs } => {
+            info!("Received MerkleBlock for height {} from {} ({} matching txs)",
+                block_height, addr, matching_indices.len());
+            for (&i, proof) in matching_indices.iter().zip(merkle_proofs.iter()) {
+                if i < tx_hashes.len() {
+                    let valid = crate::crypto::hash::verify_merkle_proof(
+                        &tx_hashes[i], proof, i, &merkle_root,
+                    );
+                    if valid {
+                        info!("SPV: Merkle proof valid for tx[{}] in block {}", i, block_height);
+                    } else {
+                        warn!("SPV: Invalid merkle proof for tx[{}] in block {}", i, block_height);
+                    }
+                }
+            }
         }
         Message::Transaction(tx) => {
             info!("Received transaction from {}: {}", addr, hex::encode(tx.hash()));

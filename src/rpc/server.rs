@@ -610,6 +610,123 @@ async fn handle_rpc_request(
                 serde_json::json!({"error": format!("Invalid address: {}", to_address)})
             }
         }
+        "getblockcount" => {
+            serde_json::json!({"blocks": blockchain.read().await.state.height})
+        }
+        "getblockhash" => {
+            let height = params.get(0).and_then(|p| p.as_u64()).unwrap_or(0);
+            let bc = blockchain.read().await;
+            match bc.get_block(height) {
+                Some(block) => serde_json::json!({"hash": hex::encode(block.hash())}),
+                None => serde_json::json!({"error": "Block not found"}),
+            }
+        }
+        "getblockheader" => {
+            let height = params.get(0).and_then(|p| p.as_u64()).unwrap_or(0);
+            let bc = blockchain.read().await;
+            match bc.get_block(height) {
+                Some(block) => serde_json::json!({
+                    "hash": hex::encode(block.hash()),
+                    "height": block.header.height,
+                    "version": block.header.version,
+                    "timestamp": block.header.timestamp,
+                    "previous_hash": hex::encode(block.header.previous_hash),
+                    "merkle_root": hex::encode(block.header.merkle_root),
+                    "difficulty": block.header.difficulty_target,
+                    "nonce": block.header.nonce,
+                    "tx_count": block.transactions.len(),
+                }),
+                None => serde_json::json!({"error": "Block not found"}),
+            }
+        }
+        "gettransaction" => {
+            let tx_hex = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
+            let tx_hash = match hex::decode(tx_hex) {
+                Ok(b) if b.len() == 32 => {
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(&b);
+                    h
+                }
+                _ => return serde_json::json!({"error": "Invalid tx hash hex"}),
+            };
+            match storage {
+                Some(ref st) => {
+                    if let Ok(s) = st.lock() {
+                        match s.get_transaction(&tx_hash) {
+                            Ok(Some(tx)) => serde_json::json!({
+                                "tx_hash": hex::encode(tx_hash),
+                                "tx_type": format!("{:?}", tx.tx_type),
+                                "fee": tx.fee,
+                                "timestamp": tx.timestamp,
+                                "inputs": tx.inputs.len(),
+                                "outputs": tx.outputs.len(),
+                                "total_output": tx.total_output(),
+                            }),
+                            _ => serde_json::json!({"error": "Transaction not found"}),
+                        }
+                    } else {
+                        serde_json::json!({"error": "Storage error"})
+                    }
+                }
+                None => serde_json::json!({"error": "No storage"}),
+            }
+        }
+        "sendrawtransaction" => {
+            let tx_hex = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
+            let tx_data = match hex::decode(tx_hex) {
+                Ok(d) => d,
+                Err(_) => return serde_json::json!({"error": "Invalid hex"}),
+            };
+            let tx: Transaction = match bincode::deserialize(&tx_data) {
+                Ok(t) => t,
+                Err(_) => return serde_json::json!({"error": "Invalid transaction data"}),
+            };
+            let tx_hash = tx.hash();
+            p2p.broadcast_transaction(&tx).await;
+            let _ = p2p.add_to_mempool(tx.clone()).await;
+            if let Some(ref st) = storage {
+                if let Ok(s) = st.lock() {
+                    let _ = s.save_transaction(&tx);
+                    let _ = s.flush();
+                }
+            }
+            serde_json::json!({"tx_hash": hex::encode(tx_hash)})
+        }
+        "getrawtransaction" => {
+            let tx_hex = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
+            let tx_hash = match hex::decode(tx_hex) {
+                Ok(b) if b.len() == 32 => {
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(&b);
+                    h
+                }
+                _ => return serde_json::json!({"error": "Invalid tx hash hex"}),
+            };
+            match storage {
+                Some(ref st) => {
+                    if let Ok(s) = st.lock() {
+                        match s.get_transaction(&tx_hash) {
+                            Ok(Some(tx)) => {
+                                let raw = bincode::serialize(&tx).unwrap_or_default();
+                                serde_json::json!({"raw": hex::encode(raw)})
+                            }
+                            _ => serde_json::json!({"error": "Transaction not found"}),
+                        }
+                    } else {
+                        serde_json::json!({"error": "Storage error"})
+                    }
+                }
+                None => serde_json::json!({"error": "No storage"}),
+            }
+        }
+        "validateaddress" => {
+            let addr_str = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
+            let is_valid = crate::chain::address::OpenCoinAddress::from_string(addr_str).is_ok();
+            serde_json::json!({
+                "address": addr_str,
+                "is_valid": is_valid,
+            })
+        }
         "deploycontract" => {
             let code_hex = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
             let args_hex = params.get(1).and_then(|p| p.as_str()).unwrap_or("");
