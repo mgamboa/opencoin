@@ -3,7 +3,7 @@ use crate::chain::block::Block;
 
 pub fn calculate_difficulty(blocks: &[Block]) -> u64 {
     if blocks.is_empty() || blocks.len() < 2 {
-        return 1;
+        return config::INITIAL_DIFFICULTY;
     }
 
     let window = config::DIFFICULTY_WINDOW as usize;
@@ -11,7 +11,7 @@ pub fn calculate_difficulty(blocks: &[Block]) -> u64 {
     let window_blocks = &blocks[start..];
 
     if window_blocks.len() < 2 {
-        return 1;
+        return config::INITIAL_DIFFICULTY;
     }
 
     let mut timestamps: Vec<u64> = window_blocks.iter().map(|b| b.header.timestamp).collect();
@@ -29,8 +29,8 @@ pub fn calculate_difficulty(blocks: &[Block]) -> u64 {
     }
     let avg_diff = (total_diff / window_blocks.len() as u128) as u64;
 
-    let adjustment = (time_span as f64 / expected_time as f64).clamp(0.25, 4.0);
-    (avg_diff as f64 / adjustment) as u64
+    let adjustment = (time_span as f64 / expected_time as f64).clamp(0.1, 10.0);
+    (avg_diff as f64 / adjustment).max(config::INITIAL_DIFFICULTY as f64) as u64
 }
 
 pub fn difficulty_to_compact(difficulty: u64) -> u32 {

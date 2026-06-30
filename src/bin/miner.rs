@@ -22,6 +22,15 @@ struct Cli {
     peers: String,
 }
 
+#[derive(Clone)]
+struct PoolJob {
+    job_id: u64,
+    height: u64,
+    block_target: u64,
+    share_target: u64,
+    header_bytes: Vec<u8>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -78,70 +87,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\nMiner stopping...");
     })?;
 
-    let stream = TcpStream::connect(&pool_addr).await?;
-    println!("Connected to pool");
-
-    let (read_half, mut write_half) = tokio::io::split(stream);
-
-    let (submit_tx, mut submit_rx) = mpsc::unbounded_channel::<String>();
-
-    let write_task = tokio::spawn(async move {
-        while let Some(msg) = submit_rx.recv().await {
-            let mut line = msg;
-            line.push('\n');
-            if write_half.write_all(line.as_bytes()).await.is_err() {
-                break;
-            }
-        }
-    });
-
     let current_job = Arc::new(tokio::sync::RwLock::new(None::<PoolJob>));
-
-    let reader_job = current_job.clone();
-    let _reader_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(read_half).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if line.trim().is_empty() { continue; }
-            if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
-                match msg["type"].as_str().unwrap_or("") {
-                    "job" => {
-                        let job_id = msg["job_id"].as_u64().unwrap_or(0);
-                        let height = msg["height"].as_u64().unwrap_or(0);
-                        let block_target = msg["target"].as_u64().unwrap_or(0);
-                        let share_target = msg["share_target"].as_u64().unwrap_or(0);
-                        let header_hex = msg["header"].as_str().unwrap_or("");
-                        let header_bytes = hex::decode(header_hex).unwrap_or_default();
-
-                        let job = PoolJob {
-                            job_id,
-                            height,
-                            block_target,
-                            share_target,
-                            header_bytes,
-                        };
-
-                        let mut j = reader_job.write().await;
-                        *j = Some(job);
-                        println!("New job #{} at height {}", job_id, height);
-                    }
-                    "result" => {
-                        let status = msg["status"].as_str().unwrap_or("");
-                        match status {
-                            "accepted" => print!("."),
-                            _ => print!("x"),
-                        }
-                        use std::io::{Write, stdout};
-                        stdout().flush().ok();
-                    }
-                    _ => {}
-                }
-            }
-        }
-    });
+    let submit_tx: Arc<tokio::sync::RwLock<Option<mpsc::UnboundedSender<String>>>> =
+        Arc::new(tokio::sync::RwLock::new(None));
 
     for thread_id in 0..cli.threads {
         let job_ref = current_job.clone();
-        let submit_tx = submit_tx.clone();
+        let submit_tx_ref = submit_tx.clone();
         let run = running.clone();
         let addr = miner_address.clone();
 
@@ -165,11 +117,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let hash_val = u64::from_le_bytes(hash[24..32].try_into().unwrap_or([0u8; 8]));
 
                     if hash_val <= job.share_target {
-                        let submit = format!(
-                            r#"{{"type":"submit","job_id":{},"nonce":{},"thread":{},"address":"{}"}}"#,
-                            job.job_id, nonce, thread_id, addr
-                        );
-                        let _ = submit_tx.send(submit);
+                        if let Some(ref tx) = *submit_tx_ref.read().await {
+                            let _ = tx.send(format!(
+                                r#"{{"type":"submit","job_id":{},"nonce":{},"thread":{},"address":"{}"}}"#,
+                                job.job_id, nonce, thread_id, addr
+                            ));
+                        }
                     }
 
                     nonce += 1;
@@ -179,10 +132,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let elapsed = last_report.elapsed().unwrap_or(Duration::from_secs(1));
                         let khs = (hashrate_samples as f64 / elapsed.as_secs_f64()) / 1000.0;
                         if thread_id == 0 {
-                            print!("\rThread {}: {:.0} KH/s, nonce: {}", thread_id, khs, nonce);
+                            eprintln!("Hashrate: {:.0} KH/s (height {}, nonce {})", khs, job.height, nonce);
                         }
-                        use std::io::{Write, stdout};
-                        stdout().flush().ok();
                         hashrate_samples = 0;
                         last_report = SystemTime::now();
                     }
@@ -194,25 +145,94 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        if !running.load(Ordering::SeqCst) {
-            break;
-        }
-    }
+        if !running.load(Ordering::SeqCst) { break; }
 
-    drop(submit_tx);
-    let _ = write_task.await;
+        println!("Connecting to pool {}...", pool_addr);
+        let stream = match TcpStream::connect(&pool_addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                println!("Connection failed: {}. Retrying in 5s...", e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+        println!("Connected to pool");
+
+        let (read_half, mut write_half) = tokio::io::split(stream);
+
+        let (new_tx, mut submit_rx) = mpsc::unbounded_channel::<String>();
+        {
+            let mut st = submit_tx.write().await;
+            *st = Some(new_tx);
+        }
+
+        let write_task = tokio::spawn(async move {
+            while let Some(msg) = submit_rx.recv().await {
+                let mut line = msg;
+                line.push('\n');
+                if write_half.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let reader_job = current_job.clone();
+        let reader_task = tokio::spawn(async move {
+            let mut lines = BufReader::new(read_half).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.trim().is_empty() { continue; }
+                if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
+                    match msg["type"].as_str().unwrap_or("") {
+                        "job" => {
+                            let job_id = msg["job_id"].as_u64().unwrap_or(0);
+                            let height = msg["height"].as_u64().unwrap_or(0);
+                            let block_target = msg["target"].as_u64().unwrap_or(0);
+                            let share_target = msg["share_target"].as_u64().unwrap_or(0);
+                            let header_hex = msg["header"].as_str().unwrap_or("");
+                            let header_bytes = hex::decode(header_hex).unwrap_or_default();
+
+                            let job = PoolJob {
+                                job_id,
+                                height,
+                                block_target,
+                                share_target,
+                                header_bytes,
+                            };
+
+                            let mut j = reader_job.write().await;
+                            *j = Some(job);
+                            println!("New job #{} at height {}", job_id, height);
+                        }
+                        "result" => {}
+                        _ => {}
+                    }
+                }
+            }
+        });
+
+        tokio::select! {
+            _ = reader_task => {
+                println!("\nPool connection lost (reader)");
+            }
+            _ = write_task => {
+                println!("\nPool write failed");
+            }
+        }
+
+        {
+            let mut j = current_job.write().await;
+            *j = None;
+        }
+        {
+            let mut st = submit_tx.write().await;
+            *st = None;
+        }
+
+        if !running.load(Ordering::SeqCst) { break; }
+        println!("Reconnecting in 5 seconds...");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 
     println!("\nMiner stopped.");
     Ok(())
-}
-
-#[derive(Clone)]
-#[allow(dead_code)]
-struct PoolJob {
-    job_id: u64,
-    height: u64,
-    block_target: u64,
-    share_target: u64,
-    header_bytes: Vec<u8>,
 }

@@ -123,6 +123,8 @@ async fn handle_connection(
         ("GET", "/pool") => html_page("OpenCoin Pool", &pool_html(&pool).await),
         ("GET", "/blocks") => html_page("OpenCoin Blocks", &blocks_html(&blockchain).await),
         ("GET", "/download") => html_page("OpenCoin Download", DOWNLOAD_HTML),
+        ("GET", "/explorer") => explorer_page(&blockchain, &p2p, None, &storage).await,
+        ("GET", "/faucet") => html_page("OpenCoin Faucet", &faucet_html(&wallet).await),
         ("POST", "/") | ("POST", "/rpc") | ("POST", "/api") => {
                     let response = match serde_json::from_str::<serde_json::Value>(&body) {
                 Ok(req) => {
@@ -148,6 +150,22 @@ async fn handle_connection(
         }
         ("OPTIONS", _) => {
             "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+        }
+        _ if path.starts_with("/explorer/block/") => {
+            let height_str = path.trim_start_matches("/explorer/block/").split('/').next().unwrap_or("");
+            let h = height_str.parse::<u64>().ok();
+            explorer_page(&blockchain, &p2p, h, &storage).await
+        }
+        _ if path.starts_with("/explorer/tx/") => {
+            let tx_hex = path.trim_start_matches("/explorer/tx/").split('/').next().unwrap_or("");
+            tx_detail_page(&blockchain, tx_hex, &storage).await
+        }
+        ("POST", "/faucet") => {
+            let to_addr = body.lines().next().unwrap_or("").trim().to_string();
+            faucet_send(&wallet, &to_addr).await
+        }
+        ("GET", "/pwa") | ("GET", "/app") | ("GET", "/wallet-app") => {
+            "HTTP/1.1 302 Found\r\nLocation: http://144.6.203.69:9770/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
         }
         _ => {
             "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{\"error\":\"not found\"}".to_string()
@@ -230,6 +248,7 @@ fn html_page(title: &str, content: &str) -> String {
         format!(
             r##"<!DOCTYPE html>
 <html><head><title>{}</title>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
@@ -250,9 +269,11 @@ th{{color:#0a0}}
 </style></head><body>
 <div class=nav>
 <a href="/">Dashboard</a>
+<a href="/explorer">Explorer</a>
 <a href="/wallet">Wallet</a>
 <a href="/blocks">Blocks</a>
 <a href="/pool">Pool</a>
+<a href="/faucet">Faucet</a>
 <a href="/download">Download</a>
 </div>
 <h1>{}</h1>
@@ -266,16 +287,35 @@ async fn dashboard_html(blockchain: &Arc<RwLock<Blockchain>>, p2p: &Arc<P2PNetwo
     let bc = blockchain.read().await;
     let peers = p2p.peers.read().await;
     let peer_count = peers.len();
+    let supply_units = bc.state.circulating_supply;
     format!(
-        r##"<div class=card><h2>Blockchain</h2>
+        r##"<div class=card style="text-align:center;border-color:#0f0;background:#0a1a0a">
+<h2 style=font-size:28px;margin:0>OpenCoin</h2>
+<p style=color:#0a0;margin:10px 0>A next-generation cryptocurrency with privacy, smart contracts, and SPV light clients.</p>
+<div style=margin:20px 0>
+<a href=/explorer style="display:inline-block;background:#0f0;color:#000;padding:10px 25px;margin:5px;border-radius:4px;font-weight:bold">Explorer</a>
+<a href=/faucet style="display:inline-block;background:#0f0;color:#000;padding:10px 25px;margin:5px;border-radius:4px;font-weight:bold">Faucet</a>
+<a href=/download style="display:inline-block;background:#222;color:#0f0;padding:10px 25px;margin:5px;border-radius:4px;border:1px solid #0f0">Download</a>
+</div>
+</div>
+<div class=card><h2>Network</h2>
 <table>
-<tr><td>Height</td><td id=height>{}</td></tr>
-<tr><td>Circulating Supply</td><td id=supply>{} OC</td></tr>
-<tr><td>Total Work</td><td id=work>{}</td></tr>
-<tr><td>Peers</td><td id=peers>{}</td></tr>
-<tr><td>Version</td><td>{}</td></tr>
+<tr><td>Height</td><td id=height>{height}</td></tr>
+<tr><td>Circulating Supply</td><td id=supply>{supply} units (20M premined)</td></tr>
+<tr><td>Peers</td><td id=peers>{peers}</td></tr>
+<tr><td>Version</td><td>{version}</td></tr>
+<tr><td>Block Time</td><td>120 seconds (target)</td></tr>
 </table></div>
-<div class=card><h2>Live</h2>
+<div class=card><h2>Features</h2>
+<table>
+<tr><td>🔗</td><td><strong>Proof of Work</strong></td><td>CPU-mineable SHA3-256 based PoW</td></tr>
+<tr><td>🛡️</td><td><strong>Stealth Addresses</strong></td><td>One-time output keys for privacy</td></tr>
+<tr><td>🔒</td><td><strong>RingCT</strong></td><td>Optional confidential transactions</td></tr>
+<tr><td>📜</td><td><strong>Smart Contracts</strong></td><td>WASM-based contract execution</td></tr>
+<tr><td>📱</td><td><strong>Light Client</strong></td><td>SPV verification with bloom filters</td></tr>
+<tr><td>⚡</td><td><strong>Mining Pool</strong></td><td>Built-in pool server with real-time miner dashboard</td></tr>
+</table></div>
+<div class=card><h2>Latest Block</h2>
 <pre id=live>Loading...</pre></div>
 <script>
 async function refresh(){{
@@ -284,18 +324,21 @@ let r=await fetch('/rpc',{{method:'POST',headers:{{'Content-Type':'application/j
 body:JSON.stringify({{jsonrpc:'2.0',method:'getinfo',params:[],id:1}})}});
 let d=await r.json();
 document.getElementById('height').textContent=d.result.height;
-document.getElementById('supply').textContent=d.result.circulating_supply+' OC';
-document.getElementById('work').textContent=d.result.total_work;
+document.getElementById('supply').textContent=d.result.circulating_supply+' units';
 }}catch(e){{}}
-document.getElementById('live').textContent=new Date().toISOString();
+try{{
+let r=await fetch('/rpc',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+body:JSON.stringify({{jsonrpc:'2.0',method:'getblock',params:[parseInt(document.getElementById('height').textContent)],id:1}})}});
+let d=await r.json();
+document.getElementById('live').innerHTML='Height: '+d.result.height+' | TXs: '+d.result.tx_count+' | Hash: '+d.result.hash.slice(0,32)+'...';
+}}catch(e){{document.getElementById('live').textContent=new Date().toISOString();}}
 }}
-setInterval(refresh,2000);refresh();
+setInterval(refresh,3000);refresh();
 </script>"##,
-        bc.state.height,
-        bc.state.circulating_supply,
-        bc.state.total_work,
-        peer_count,
-        crate::config::VERSION,
+        height = bc.state.height,
+        supply = supply_units,
+        peers = peer_count,
+        version = crate::config::VERSION,
     )
 }
 
@@ -487,6 +530,306 @@ setInterval(refresh,2000);refresh();
         }
         None => {
             "<div class=card><h2>Pool</h2><p>Pool server not enabled. Start with <code>--pool</code> flag.</p></div>".to_string()
+        }
+    }
+}
+
+async fn explorer_page(
+    blockchain: &Arc<RwLock<Blockchain>>,
+    p2p: &Arc<P2PNetwork>,
+    block_height: Option<u64>,
+    _storage: &Option<Arc<Mutex<Storage>>>,
+) -> String {
+    let bc = blockchain.read().await;
+    let height = bc.state.height;
+    let peers = p2p.peers.read().await.len();
+
+    if let Some(h) = block_height {
+        if let Some(block) = bc.get_block(h) {
+            let hash = hex::encode(block.hash());
+            let prev_hash = hex::encode(block.header.previous_hash);
+            let merkle = hex::encode(block.header.merkle_root);
+            let mut tx_rows = String::new();
+            for (i, tx) in block.transactions.iter().enumerate() {
+                let txh = hex::encode(tx.hash());
+                let tx_type = format!("{:?}", tx.tx_type);
+                let total = tx.total_output();
+                tx_rows.push_str(&format!(
+                    r#"<tr><td style=font-size:11px><a href="/explorer/tx/{}">{}</a></td><td>{}</td><td>{}</td><td>{}</td></tr>"#,
+                    &txh[..32], &txh[..32], tx_type, total, tx.inputs.len(),
+                ));
+            }
+            let ts = format_timestamp(block.header.timestamp);
+            let reward = block.transactions.first()
+                .map(|tx| tx.outputs.iter().map(|o| o.amount).sum::<u64>())
+                .unwrap_or(0);
+            let content = format!(
+                r##"<div class=card>
+<h2>Block #{h}</h2>
+<table>
+<tr><td>Hash</td><td style=font-size:11px>{hash}</td></tr>
+<tr><td>Previous Hash</td><td style=font-size:11px>{prev_hash}</td></tr>
+<tr><td>Merkle Root</td><td style=font-size:11px>{merkle}</td></tr>
+<tr><td>Timestamp</td><td>{ts}</td></tr>
+<tr><td>Transactions</td><td>{tx_count}</td></tr>
+<tr><td>Reward</td><td>{reward} OC</td></tr>
+<tr><td>Difficulty</td><td>{diff}</td></tr>
+<tr><td>Nonce</td><td>{nonce}</td></tr>
+</table></div>
+<div class=card><h2>Transactions ({tx_count})</h2>
+<table>
+<tr><th>Hash</th><th>Type</th><th>Total</th><th>Inputs</th></tr>
+{tx_rows}</table></div>
+<div style=margin-top:10px>
+<a href="/explorer/block/{prev}">← Previous Block</a>
+<a href="/explorer/block/{next}" style=margin-left:20px>Next Block →</a>
+</div>"##,
+                h = h, hash = hash, prev_hash = prev_hash, merkle = merkle,
+                ts = ts, tx_count = block.transactions.len(), reward = reward,
+                diff = block.header.difficulty_target, nonce = block.header.nonce,
+                tx_rows = tx_rows,
+                prev = h.saturating_sub(1), next = h + 1,
+            );
+            return html_page(&format!("Block #{}", h), &content);
+        }
+        return html_page("Block Not Found", "<div class=card><h2>Block Not Found</h2><p>No block at this height.</p><a href=/explorer>← Back to Explorer</a></div>");
+    }
+
+    let start = if height > 25 { height - 25 } else { 0 };
+    let mut rows = String::new();
+    for h in (start..=height).rev() {
+        if let Some(block) = bc.get_block(h) {
+            let hash = hex::encode(block.hash());
+            let reward = block.transactions.first()
+                .map(|tx| tx.outputs.iter().map(|o| o.amount).sum::<u64>())
+                .unwrap_or(0);
+            let ts = format_timestamp(block.header.timestamp);
+            rows.push_str(&format!(
+                r#"<tr><td>{}</td><td style=font-size:11px><a href="/explorer/block/{}">{}</a></td><td>{}</td><td>{}</td><td>{}</td></tr>"#,
+                h, h, &hash[..16], reward, block.transactions.len(), ts,
+            ));
+        }
+    }
+    let content = format!(
+        r##"<div class=card><h2>Network</h2>
+<table>
+<tr><td>Height</td><td id=exp-height>{height}</td></tr>
+<tr><td>Circulating Supply</td><td id=exp-supply>{supply} OC</td></tr>
+<tr><td>Peers</td><td id=exp-peers>{peers}</td></tr>
+</table></div>
+<div class=card><h2>Search</h2>
+<form onsubmit="searchExplorer(event)" style=display:flex;gap:10px>
+<input id=searchQ style="flex:1;padding:8px;background:#222;color:#0f0;border:1px solid #333;border-radius:4px;font-family:monospace" placeholder="Block height, transaction hash, or address...">
+<button type=submit style="background:#0f0;color:#000;border:none;padding:8px 20px;border-radius:4px;font-weight:bold;cursor:pointer">Search</button>
+</form>
+<pre id=searchResult style=margin-top:10px></pre>
+</div>
+<div class=card><h2>Recent Blocks (last 25)</h2>
+<table>
+<tr><th>Height</th><th>Hash</th><th>Reward</th><th>TXs</th><th>Timestamp</th></tr>
+{rows}</table></div>
+<script>
+function searchExplorer(e){{e.preventDefault();
+let q=document.getElementById('searchQ').value.trim();
+if(!q)return;
+// Try as block height
+let h=parseInt(q);
+if(!isNaN(h)&&h>=0){{window.location='/explorer/block/'+h;return;}}
+// Try as tx hash
+if(q.length>=16){{window.location='/explorer/tx/'+q;return;}}
+document.getElementById('searchResult').textContent='No results for: '+q;
+}}
+async function refresh(){{
+try{{
+let r=await fetch('/rpc',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+body:JSON.stringify({{jsonrpc:'2.0',method:'getinfo',params:[],id:1}})}});
+let d=await r.json();
+document.getElementById('exp-height').textContent=d.result.height;
+document.getElementById('exp-supply').textContent=d.result.circulating_supply+' OC';
+document.getElementById('exp-peers').textContent=d.result.peers||'?';
+}}catch(e){{}}
+}}
+setInterval(refresh,3000);refresh();
+</script>"##,
+        height = height, supply = bc.state.circulating_supply, peers = peers,
+    );
+    html_page("Explorer", &content)
+}
+
+async fn tx_detail_page(
+    blockchain: &Arc<RwLock<Blockchain>>,
+    tx_hex: &str,
+    storage: &Option<Arc<Mutex<Storage>>>,
+) -> String {
+    let tx_hash_hex = tx_hex.trim();
+    let tx_hash_bytes = match hex::decode(tx_hash_hex) {
+        Ok(b) if b.len() >= 32 => {
+            let mut h = [0u8; 32];
+            let start = if b.len() > 32 { b.len() - 32 } else { 0 };
+            h.copy_from_slice(&b[start..start+32]);
+            h
+        }
+        _ => {
+            // Try looking up by scanning blocks
+            let mut found = None;
+            let bc = blockchain.read().await;
+            'outer: for h in 0..=bc.state.height {
+                if let Some(block) = bc.get_block(h) {
+                    for tx in &block.transactions {
+                        if hex::encode(tx.hash()).contains(tx_hash_hex) || hex::encode(tx.hash()).starts_with(tx_hash_hex) {
+                            found = Some((tx.clone(), h));
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            match found {
+                Some((tx, height)) => return tx_detail_render(&tx, height, tx_hash_hex),
+                None => return html_page("Transaction Not Found", &format!(
+                    "<div class=card><h2>Transaction Not Found</h2><p>No transaction matching '{}'.</p><a href=/explorer>← Back to Explorer</a></div>", tx_hash_hex
+                )),
+            }
+        }
+    };
+
+    // Look up by hash from storage first
+    if let Some(ref st) = storage {
+        let found = st.lock().ok().and_then(|s| s.get_transaction(&tx_hash_bytes).ok().flatten());
+        if let Some(tx) = found {
+            // Find which block contains this tx
+            let bc = blockchain.read().await;
+            for h in 0..=bc.state.height {
+                if let Some(block) = bc.get_block(h) {
+                    if block.transactions.iter().any(|t| t.hash() == tx_hash_bytes) {
+                        return tx_detail_render(&tx, h, tx_hash_hex);
+                    }
+                }
+            }
+            return tx_detail_render(&tx, 0, tx_hash_hex);
+        }
+    }
+
+    // Fallback: scan blocks in memory
+    let bc = blockchain.read().await;
+    for h in 0..=bc.state.height {
+        if let Some(block) = bc.get_block(h) {
+            if let Some(tx) = block.transactions.iter().find(|t| t.hash() == tx_hash_bytes) {
+                return tx_detail_render(tx, h, tx_hash_hex);
+            }
+        }
+    }
+    html_page("Transaction Not Found", &format!(
+        "<div class=card><h2>Transaction Not Found</h2><p>No transaction matching '{}'.</p><a href=/explorer>← Back to Explorer</a></div>", tx_hash_hex
+    ))
+}
+
+fn tx_detail_render(tx: &Transaction, height: u64, tx_hash_hex: &str) -> String {
+    let txh = hex::encode(tx.hash());
+    let tx_type = format!("{:?}", tx.tx_type);
+    let ts = format_timestamp(tx.timestamp);
+    let mut outputs_html = String::new();
+    for (i, o) in tx.outputs.iter().enumerate() {
+        let addr = hex::encode(&o.stealth_address.spend_pub.0);
+        outputs_html.push_str(&format!(
+            "<tr><td>{}</td><td style=font-size:11px>{}</td><td>{}</td></tr>",
+            i, addr, o.amount,
+        ));
+    }
+    let mut inputs_html = String::new();
+    for (i, inp) in tx.inputs.iter().enumerate() {
+        let prev_tx = hex::encode(&inp.outpoint.tx_hash);
+        inputs_html.push_str(&format!(
+            "<tr><td>{}</td><td style=font-size:11px>{}</td><td>{}</td></tr>",
+            i, prev_tx, inp.outpoint.index,
+        ));
+    }
+    let content = format!(
+        r##"<div class=card><h2>Transaction</h2>
+<table>
+<tr><td>Hash</td><td style=font-size:11px;word-break:break-all>{txh}</td></tr>
+<tr><td>Type</td><td>{tx_type}</td></tr>
+<tr><td>Fee</td><td>{fee}</td></tr>
+<tr><td>Timestamp</td><td>{ts}</td></tr>
+<tr><td>Block Height</td><td><a href="/explorer/block/{height}">{height}</a></td></tr>
+</table></div>
+<div class=card><h2>Outputs ({outputs_len})</h2>
+<table><tr><th>Index</th><th>Address</th><th>Amount</th></tr>{outputs_html}</table></div>
+<div class=card><h2>Inputs ({inputs_len})</h2>
+<table><tr><th>Index</th><th>Source TX</th><th>Output</th></tr>{inputs_html}</table></div>
+<div style=margin-top:10px><a href="/explorer">← Back to Explorer</a></div>"##,
+        txh = txh, tx_type = tx_type, fee = tx.fee, ts = ts, height = height,
+        outputs_len = tx.outputs.len(), outputs_html = outputs_html,
+        inputs_len = tx.inputs.len(), inputs_html = inputs_html,
+    );
+    html_page(&format!("TX {}", &tx_hash_hex[..16]), &content)
+}
+
+async fn faucet_html(wallet: &Arc<RwLock<Option<Wallet>>>) -> String {
+    let w = wallet.read().await;
+    match w.as_ref() {
+        Some(wallet_data) => {
+            let addr = wallet_data.address_string().unwrap_or_default();
+            let bal = wallet_data.balance;
+            format!(
+                r##"<div class=card><h2>OpenCoin Faucet</h2>
+<p>Get free test coins to try the network. Limited to 100 OC per request.</p>
+<table>
+<tr><td>Faucet Balance</td><td id=faucet-bal>{bal} OC</td></tr>
+<tr><td>Max per request</td><td>100 OC</td></tr>
+</table></div>
+<div class=card><h2>Request Coins</h2>
+<form onsubmit="faucetSend(event)">
+<table>
+<tr><td>Your Address:</td><td><input id=faucetAddr style="width:100%;font-family:monospace;background:#222;color:#0f0;border:1px solid #333;padding:8px;border-radius:4px" placeholder="OC..."></td></tr>
+<tr><td></td><td><button type=submit style="background:#0f0;color:#000;border:none;padding:8px 20px;border-radius:4px;font-weight:bold;cursor:pointer">GET COINS</button></td></tr>
+</table>
+</form>
+<pre id=faucetResult style=margin-top:10px></pre>
+</div>
+<script>
+async function faucetSend(e){{e.preventDefault();
+const addr=document.getElementById('faucetAddr').value.trim();
+if(!addr){{document.getElementById('faucetResult').textContent='Enter an address';return;}}
+try{{
+let r=await fetch('/rpc',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+body:JSON.stringify({{jsonrpc:'2.0',method:'sendtoaddress',params:[addr,100],id:1}})}});
+let d=await r.json();
+if(d.result.error){{
+document.getElementById('faucetResult').textContent='Error: '+d.result.error;
+}}else{{
+document.getElementById('faucetResult').innerHTML='✅ Sent 100 OC!<br>TX: <span style=font-size:11px>'+d.result.tx_hash+'</span>';
+document.getElementById('faucet-bal').textContent=(parseInt(document.getElementById('faucet-bal').textContent)-100)+' OC';
+}}
+}}catch(e){{document.getElementById('faucetResult').textContent='Request failed: '+e;}}
+}}
+</script>"##
+            )
+        }
+        None => {
+            r#"<div class=card><h2>Faucet</h2><p>Faucet is not available right now.</p></div>"#.to_string()
+        }
+    }
+}
+
+async fn faucet_send(wallet: &Arc<RwLock<Option<Wallet>>>, to_addr: &str) -> String {
+    let w = wallet.read().await;
+    match w.as_ref() {
+        Some(w_ref) => {
+            let bal = w_ref.balance;
+            if bal < 100 {
+                return "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><p>Faucet empty. Balance: {bal} OC</p><a href=/faucet>← Back</a></body></html>".to_string();
+            }
+            if to_addr.is_empty() || !to_addr.starts_with("OC") || to_addr.len() != 74 {
+                return "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><p>Invalid address. Must be a valid OC address (74 chars starting with OC).</p><a href=/faucet>← Back</a></body></html>".to_string();
+            }
+            // Send via RPC parameters - we'll redirect to the JS approach
+            let url = format!("/faucet");
+            format!(
+                "HTTP/1.1 302 Found\r\nLocation: {}\r\nContent-Length: 0\r\n\r\n", url
+            )
+        }
+        None => {
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><p>Faucet wallet not loaded.</p><a href=/faucet>← Back</a></body></html>".to_string()
         }
     }
 }
@@ -949,6 +1292,33 @@ async fn handle_rpc_request(
                 }
                 Err(e) => serde_json::json!({"error": e}),
             }
+        }
+        "getblocks" => {
+            let start = params.get(0).and_then(|p| p.as_u64()).unwrap_or(0);
+            let count = params.get(1).and_then(|p| p.as_u64()).unwrap_or(20).min(100);
+            let bc = blockchain.read().await;
+            let end = (start + count).min(bc.state.height + 1);
+            let mut blocks = Vec::new();
+            for h in start..end {
+                if let Some(block) = bc.get_block(h) {
+                    let reward = block.transactions.first()
+                        .map(|tx| tx.outputs.iter().map(|o| o.amount).sum::<u64>())
+                        .unwrap_or(0);
+                    blocks.push(serde_json::json!({
+                        "height": h,
+                        "hash": hex::encode(block.hash()),
+                        "timestamp": block.header.timestamp,
+                        "tx_count": block.transactions.len(),
+                        "reward": reward,
+                    }));
+                }
+            }
+            serde_json::json!({"blocks": blocks, "start": start, "count": blocks.len(), "total": bc.state.height + 1})
+        }
+        "getmempoolinfo" => {
+            let mempool = p2p.mempool.read().await;
+            let txs: Vec<String> = mempool.iter().map(|tx| hex::encode(tx.hash())).collect();
+            serde_json::json!({"size": mempool.len(), "txs": txs})
         }
         "getpoolstats" => {
             match pool {

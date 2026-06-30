@@ -13,8 +13,7 @@ use crate::chain::transaction::{Transaction, TransactionType};
 use crate::chain::blockchain::Blockchain;
 use crate::crypto::hash::merkle_root;
 use crate::crypto::stealth::StealthAddress;
-use crate::consensus::difficulty::{calculate_difficulty, difficulty_to_compact};
-use crate::consensus::pow::calculate_target;
+use crate::consensus::difficulty::{calculate_difficulty, compact_to_target, difficulty_to_compact};
 use crate::p2p::P2PNetwork;
 use crate::wallet::Wallet;
 use crate::storage::db::Storage;
@@ -51,6 +50,8 @@ pub struct PoolServer {
     pub storage: Option<Arc<std::sync::Mutex<Storage>>>,
     pub miners: Arc<RwLock<HashMap<SocketAddr, MinerInfo>>>,
     pub current_template: Arc<RwLock<Option<BlockTemplate>>>,
+    pub template_tx: tokio::sync::watch::Sender<Option<BlockTemplate>>,
+    pub template_rx: tokio::sync::watch::Receiver<Option<BlockTemplate>>,
     pub job_counter: Arc<AtomicU64>,
     pub total_shares: Arc<AtomicU64>,
     pub running: Arc<AtomicBool>,
@@ -59,6 +60,7 @@ pub struct PoolServer {
 
 impl PoolServer {
     pub fn new(port: u16, pool_address: StealthAddress, blockchain: Arc<RwLock<Blockchain>>) -> Self {
+        let (template_tx, template_rx) = tokio::sync::watch::channel(None);
         PoolServer {
             port,
             pool_address,
@@ -68,6 +70,8 @@ impl PoolServer {
             storage: None,
             miners: Arc::new(RwLock::new(HashMap::new())),
             current_template: Arc::new(RwLock::new(None)),
+            template_tx,
+            template_rx,
             job_counter: Arc::new(AtomicU64::new(1)),
             total_shares: Arc::new(AtomicU64::new(0)),
             running: Arc::new(AtomicBool::new(true)),
@@ -96,6 +100,7 @@ impl PoolServer {
         info!("Pool server listening on {}", addr);
 
         let template_updater = self.current_template.clone();
+        let template_tx = self.template_tx.clone();
         let blockchain = self.blockchain.clone();
         let pool_addr = self.pool_address.clone();
         let job_counter = self.job_counter.clone();
@@ -127,12 +132,8 @@ impl PoolServer {
 
                 let difficulty = calculate_difficulty(&bc.blocks);
                 let compact_target = difficulty_to_compact(difficulty);
-                let block_target = calculate_target(difficulty);
-                let share_target = if block_target < u64::MAX / 100 {
-                    block_target * 100
-                } else {
-                    u64::MAX / 1000
-                };
+                let block_target = compact_to_target(compact_target);
+                let share_target = u64::MAX / 1_000_000;
 
                 let timestamp = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -171,7 +172,8 @@ impl PoolServer {
                 };
                 if should_update {
                     info!("New pool job #{} at height {}", job_id, height);
-                    *current = Some(template);
+                    *current = Some(template.clone());
+                    let _ = template_tx.send(Some(template));
                 }
                 drop(current);
                 drop(bc);
@@ -195,9 +197,7 @@ impl PoolServer {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
         let miners = self.miners.clone();
-        let current_template = self.current_template.clone();
         let total_shares = self.total_shares.clone();
-        let pool_address = self.pool_address.clone();
         let p2p = self.p2p.clone();
 
         {
@@ -211,23 +211,17 @@ impl PoolServer {
             });
         }
 
-        let (read_half, mut write_half) = tokio::io::split(stream);
+        let (read_half, write_half) = tokio::io::split(stream);
+        let write_half = std::sync::Arc::new(tokio::sync::Mutex::new(write_half));
 
-        async fn send_msg<W: tokio::io::AsyncWriteExt + Unpin>(w: &mut W, msg: &str) {
+        async fn send_msg(w: &tokio::sync::Mutex<tokio::io::WriteHalf<tokio::net::TcpStream>>, msg: &str) {
             let mut line = msg.to_string();
             line.push('\n');
-            let _ = w.write_all(line.as_bytes()).await;
+            let mut guard = w.lock().await;
+            let _ = guard.write_all(line.as_bytes()).await;
         }
 
-        let template = current_template.read().await;
-        if let Some(t) = template.as_ref() {
-            let job_json = format!(
-                r#"{{"type":"job","job_id":{},"height":{},"target":{},"share_target":{},"header":"{}"}}"#,
-                t.job_id, t.height, t.block_target, t.share_target, hex::encode(&t.header_bytes)
-            );
-            send_msg(&mut write_half, &job_json).await;
-        }
-        drop(template);
+        let template_rx = self.template_rx.clone();
 
         let ct = self.current_template.clone();
         let bc2 = self.blockchain.clone();
@@ -235,6 +229,34 @@ impl PoolServer {
         let p2p = p2p.clone();
         let wallet = self.wallet.clone();
         let storage = self.storage.clone();
+
+        let write_half_job = write_half.clone();
+        let mut template_rx_clone = template_rx.clone();
+        tokio::spawn(async move {
+            {
+                let t = (*template_rx_clone.borrow_and_update()).clone();
+                if let Some(ref tmpl) = t {
+                    let job_json = format!(
+                        r#"{{"type":"job","job_id":{},"height":{},"target":{},"share_target":{},"header":"{}"}}"#,
+                        tmpl.job_id, tmpl.height, tmpl.block_target, tmpl.share_target, hex::encode(&tmpl.header_bytes)
+                    );
+                    send_msg(&*write_half_job, &job_json).await;
+                }
+            }
+            loop {
+                if template_rx_clone.changed().await.is_err() {
+                    break;
+                }
+                let t = (*template_rx_clone.borrow_and_update()).clone();
+                if let Some(ref tmpl) = t {
+                    let job_json = format!(
+                        r#"{{"type":"job","job_id":{},"height":{},"target":{},"share_target":{},"header":"{}"}}"#,
+                        tmpl.job_id, tmpl.height, tmpl.block_target, tmpl.share_target, hex::encode(&tmpl.header_bytes)
+                    );
+                    send_msg(&*write_half_job, &job_json).await;
+                }
+            }
+        });
 
         tokio::spawn(async move {
             let mut reader = BufReader::new(read_half);
@@ -289,95 +311,104 @@ impl PoolServer {
                                             }
 
                                             if is_block {
-                                                let mut bc = bc2.write().await;
-                                                let reward = calculate_block_reward(t.height, bc.state.premine_remaining);
+                                                let bc2_clone = bc2.clone();
+                                                let p2p_clone = p2p.clone();
+                                                let wallet_clone = wallet.clone();
+                                                let storage_clone = storage.clone();
+                                                let miners_clone = miners.clone();
+                                                let round_shares_clone = round_shares.clone();
+                                                let write_half_clone = write_half.clone();
+                                                let miner_addr = addr;
+                                                let _miner_wallet = wallet_addr.clone();
+                                                let coinbase_tx = t.coinbase_tx.clone();
+                                                let header_bytes = t.header_bytes.clone();
+                                                let mempool_txs = t.mempool_txs.clone();
+                                                let height = t.height;
+                                                let _block_target = t.block_target;
+                                                let nonce_val = nonce;
 
-                                                let pool_fee = reward * POOL_FEE_PERCENT / 100;
-                                                let miner_total = reward - pool_fee;
+                                                tokio::spawn(async move {
+                                                    let mut bc = bc2_clone.write().await;
 
-                                                let rs_snapshot = {
-                                                    let rs = round_shares.read().await;
-                                                    rs.clone()
-                                                };
-                                                {
-                                                    let mut rs = round_shares.write().await;
-                                                    rs.clear();
-                                                }
+                                                    // Use the exact header from the template so the hash matches
+                                                    // what the miner computed. header_bytes layout:
+                                                    // 0-3: version, 4-11: height, 12-19: timestamp,
+                                                    // 20-51: previous_hash, 52-83: merkle_root, 84-87: compact_target
+                                                    let timestamp = u64::from_le_bytes(
+                                                        header_bytes[12..20].try_into().unwrap_or([0u8; 8])
+                                                    );
+                                                    let mut merkle_root_arr = [0u8; 32];
+                                                    merkle_root_arr.copy_from_slice(&header_bytes[52..84]);
+                                                    let compact_target = u32::from_le_bytes(
+                                                        header_bytes[84..88].try_into().unwrap_or([0u8; 4])
+                                                    );
 
-                                                let total_round: u64 = rs_snapshot.values().sum();
-                                                let mut recipients: Vec<(StealthAddress, u64)> = Vec::new();
-                                                if total_round > 0 {
-                                                    let mut distributed: u64 = 0;
-                                                    for (addr_str, shares) in &rs_snapshot {
-                                                        let payout = miner_total * shares / total_round;
-                                                        if payout > 0 {
-                                                            if let Ok(oc_addr) = OpenCoinAddress::from_string(addr_str) {
-                                                                let miner_addr = oc_addr.to_stealth();
-                                                                recipients.push((miner_addr, payout));
-                                                                distributed += payout;
+                                                    let mut all_txs = vec![coinbase_tx];
+                                                    all_txs.extend(mempool_txs);
+                                                    let block = Block {
+                                                        header: BlockHeader {
+                                                            version: 1,
+                                                            height,
+                                                            timestamp,
+                                                            previous_hash: bc.state.current_hash,
+                                                            merkle_root: merkle_root_arr,
+                                                            difficulty_target: compact_target,
+                                                            nonce: nonce_val,
+                                                            extra_nonce: 0,
+                                                        },
+                                                        transactions: all_txs,
+                                                    };
+
+                                                    let num_miners = {
+                                                        let rs = round_shares_clone.read().await;
+                                                        rs.len()
+                                                    };
+                                                    {
+                                                        let mut rs = round_shares_clone.write().await;
+                                                        rs.clear();
+                                                    }
+
+                                                    match bc.add_block(block.clone()) {
+                                                        Ok(()) => {
+                                                            info!("Pool found block {}! Nonce: {}", height, nonce_val);
+                                                            info!("Pool collected full reward; {} miners paid via pool wallet", num_miners);
+                                                            drop(bc);
+                                                            if let Some(ref p) = p2p_clone {
+                                                                p.broadcast_block(&block).await;
                                                             }
-                                                        }
-                                                    }
-                                                    let remainder = miner_total.saturating_sub(distributed);
-                                                    if remainder > 0 {
-                                                        recipients.push((pool_address.clone(), remainder));
-                                                    }
-                                                }
-                                                recipients.push((pool_address.clone(), pool_fee));
-
-                                                let coinbase = Transaction::coinbase_multi_output(&recipients);
-                                                let mut all_txs = vec![coinbase];
-                                                all_txs.extend(t.mempool_txs.clone());
-                                                let all_tx_hashes: Vec<[u8; 32]> = all_txs.iter().map(|t| t.hash()).collect();
-                                                let block_merkle = merkle_root(&all_tx_hashes);
-                                                let block = Block {
-                                                    header: BlockHeader {
-                                                        version: 1,
-                                                        height: t.height,
-                                                        timestamp: SystemTime::now()
-                                                            .duration_since(UNIX_EPOCH).unwrap().as_secs(),
-                                                        previous_hash: bc.state.current_hash,
-                                                        merkle_root: block_merkle,
-                                                        difficulty_target: difficulty_to_compact(t.difficulty),
-                                                        nonce,
-                                                        extra_nonce: 0,
-                                                    },
-                                                    transactions: all_txs,
-                                                };
-
-                                                match bc.add_block(block.clone()) {
-                                                    Ok(()) => {
-                                                        info!("Pool found block {}! Nonce: {}", t.height, nonce);
-                                                        info!("Pool fee: {} ({}%), miners: {} OC distributed to {} miners", 
-                                                            pool_fee, POOL_FEE_PERCENT, miner_total, rs_snapshot.len());
-                                                        drop(bc);
-                                                        if let Some(ref p) = p2p {
-                                                            p.broadcast_block(&block).await;
-                                                        }
-                                                        if let Some(ref w) = wallet {
-                                                            let mut wallet_lock = w.write().await;
-                                                            if let Some(ref mut wlt) = *wallet_lock {
-                                                                if wlt.scan_block(&block) > 0 {
-                                                                    if let Some(ref st) = storage {
-                                                                        if let Ok(s) = st.lock() {
-                                                                            let _ = s.save_wallet(wlt);
+                                                            if let Some(ref w) = wallet_clone {
+                                                                let mut wallet_lock = w.write().await;
+                                                                if let Some(ref mut wlt) = *wallet_lock {
+                                                                    if wlt.scan_block(&block) > 0 {
+                                                                        if let Some(ref st) = storage_clone {
+                                                                            if let Ok(s) = st.lock() {
+                                                                                let _ = s.save_wallet(wlt);
+                                                                            }
                                                                         }
                                                                     }
                                                                 }
                                                             }
+                                                            {
+                                                                let mut m = miners_clone.write().await;
+                                                                if let Some(info) = m.get_mut(&miner_addr) {
+                                                                    info.valid_blocks += 1;
+                                                                }
+                                                            }
+                                                            send_msg(&*write_half_clone, &format!(
+                                                                r#"{{"type":"result","job_id":{},"nonce":{},"status":"accepted","message":"Block accepted"}}"#,
+                                                                job_id, nonce_val
+                                                            )).await;
                                                         }
-                                                        let mut m = miners.write().await;
-                                                        if let Some(info) = m.get_mut(&addr) {
-                                                            info.valid_blocks += 1;
+                                                        Err(e) => {
+                                                            warn!("Pool block rejected: {}", e);
+                                                            send_msg(&*write_half_clone, &format!(
+                                                                r#"{{"type":"result","job_id":{},"nonce":{},"status":"rejected","message":"Block rejected: {}"}}"#,
+                                                                job_id, nonce_val, e
+                                                            )).await;
                                                         }
-                                                        drop(m);
-                                                        Some((true, "Block accepted".to_string()))
                                                     }
-                                                    Err(e) => {
-                                                        warn!("Pool block rejected: {}", e);
-                                                        Some((false, format!("Block rejected: {}", e)))
-                                                    }
-                                                }
+                                                });
+                                                None
                                             } else if is_share {
                                                 Some((true, "Share accepted".to_string()))
                                             } else {
@@ -395,8 +426,9 @@ impl PoolServer {
                                             r#"{{"type":"result","job_id":{},"nonce":{},"status":"{}","message":"{}"}}"#,
                                             job_id, nonce, status, msg
                                         );
-                                        let _ = write_half.write_all(resp.as_bytes()).await;
-                                        let _ = write_half.write_all(b"\n").await;
+                                        let mut w = write_half.lock().await;
+                                        let _ = w.write_all(resp.as_bytes()).await;
+                                        let _ = w.write_all(b"\n").await;
                                     }
                                 }
                                 _ => {}
