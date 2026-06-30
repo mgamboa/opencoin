@@ -1,5 +1,8 @@
 /target/
 *.json
+!mobile/seeds.json
+!mobile/app.json
+!mobile/eas.json
 OPENCOIN_WALLET_*.txt
 SESSION-SUMMARY-*.md
 docs/exchange/

@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "OpenCoin Wallet",
+    "slug": "opencoin-wallet",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "scheme": "opencoin",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.laat.opencoin"
+    },
+    "android": {
+      "package": "com.laat.opencoin",
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      }
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "19b3d525-7e46-425f-96d8-86f99a47d991"
+      }
+    },
+    "owner": "mgamboap"
+  }
+}
