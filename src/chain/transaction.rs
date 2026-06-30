@@ -39,6 +39,9 @@ pub struct Transaction {
     pub signatures: Vec<SignatureBytes>,
     pub ring_signature: Option<RingSignature>,
     pub memo: Option<String>,
+    pub contract_code: Option<Vec<u8>>,
+    pub contract_address: Option<[u8; 32]>,
+    pub contract_fn: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -46,7 +49,8 @@ pub enum TransactionType {
     Coinbase,
     Transfer,
     Private,
-    SmartContract,
+    ContractDeploy,
+    ContractCall,
 }
 
 impl Transaction {
@@ -69,6 +73,9 @@ impl Transaction {
             signatures: Vec::new(),
             ring_signature: None,
             memo: Some(String::from("Coinbase")),
+            contract_code: None,
+            contract_address: None,
+            contract_fn: None,
         }
     }
 
@@ -136,6 +143,9 @@ impl Transaction {
             memo: Some(format!("Transfer {} OC to {}",
                 amount as f64 / crate::config::COIN as f64,
                 hex::encode(&recipient.spend_pub.0[..8]))),
+            contract_code: None,
+            contract_address: None,
+            contract_fn: None,
         };
 
         for (i, _) in utxos.iter().enumerate() {
@@ -212,6 +222,9 @@ impl Transaction {
             signatures: Vec::new(),
             ring_signature: None,
             memo: None,
+            contract_code: None,
+            contract_address: None,
+            contract_fn: None,
         };
 
         let tx_hash = tx.hash();
@@ -255,7 +268,127 @@ impl Transaction {
             signatures: Vec::new(),
             ring_signature: None,
             memo: Some(String::from("Pool Coinbase")),
+            contract_code: None,
+            contract_address: None,
+            contract_fn: None,
         }
+    }
+
+    pub fn contract_deploy(
+        sender_kp: &KeyPair,
+        code: Vec<u8>,
+        _args: Vec<u8>,
+        fee: u64,
+        utxos: &[(OutPoint, u64)],
+    ) -> Self {
+        let total_in: u64 = utxos.iter().map(|(_, amt)| amt).sum();
+        let change = total_in.saturating_sub(fee);
+        let sender_stealth = StealthAddress {
+            spend_pub: sender_kp.public.clone(),
+            view_pub: sender_kp.public.clone(),
+        };
+
+        let mut outputs = Vec::new();
+        if change > 0 {
+            let (out_change, _) = crate::crypto::stealth::create_stealth_output(&sender_stealth, change);
+            outputs.push(TxOutput {
+                stealth_address: sender_stealth,
+                one_time_output: out_change,
+                amount: change,
+                commitment: None,
+                range_proof: None,
+                view_key_proof: None,
+            });
+        }
+
+        let mut tx = Transaction {
+            version: 2,
+            tx_type: TransactionType::ContractDeploy,
+            inputs: utxos.iter().map(|(outpoint, _)| TxInput {
+                outpoint: outpoint.clone(),
+                key_image: KeyImage([0u8; 32]),
+                signature: SignatureBytes([0u8; 64]),
+                pubkey: sender_kp.public.clone(),
+            }).collect(),
+            outputs,
+            fee,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            signatures: Vec::new(),
+            ring_signature: None,
+            memo: Some(format!("Deploy contract ({} bytes)", code.len())),
+            contract_code: Some(code),
+            contract_address: None,
+            contract_fn: None,
+        };
+
+        for (i, _) in utxos.iter().enumerate() {
+            let sig = tx.sign_hash(sender_kp, i);
+            tx.inputs[i].signature = sig;
+        }
+
+        tx
+    }
+
+    pub fn contract_call(
+        sender_kp: &KeyPair,
+        contract_address: [u8; 32],
+        function: &str,
+        _args: Vec<u8>,
+        fee: u64,
+        utxos: &[(OutPoint, u64)],
+    ) -> Self {
+        let total_in: u64 = utxos.iter().map(|(_, amt)| amt).sum();
+        let change = total_in.saturating_sub(fee);
+        let sender_stealth = StealthAddress {
+            spend_pub: sender_kp.public.clone(),
+            view_pub: sender_kp.public.clone(),
+        };
+
+        let mut outputs = Vec::new();
+        if change > 0 {
+            let (out_change, _) = crate::crypto::stealth::create_stealth_output(&sender_stealth, change);
+            outputs.push(TxOutput {
+                stealth_address: sender_stealth,
+                one_time_output: out_change,
+                amount: change,
+                commitment: None,
+                range_proof: None,
+                view_key_proof: None,
+            });
+        }
+
+        let mut tx = Transaction {
+            version: 2,
+            tx_type: TransactionType::ContractCall,
+            inputs: utxos.iter().map(|(outpoint, _)| TxInput {
+                outpoint: outpoint.clone(),
+                key_image: KeyImage([0u8; 32]),
+                signature: SignatureBytes([0u8; 64]),
+                pubkey: sender_kp.public.clone(),
+            }).collect(),
+            outputs,
+            fee,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            signatures: Vec::new(),
+            ring_signature: None,
+            memo: Some(format!("Call {} on contract {}", function, hex::encode(&contract_address[..8]))),
+            contract_code: None,
+            contract_address: Some(contract_address),
+            contract_fn: Some(function.to_string()),
+        };
+
+        for (i, _) in utxos.iter().enumerate() {
+            let sig = tx.sign_hash(sender_kp, i);
+            tx.inputs[i].signature = sig;
+        }
+
+        tx
     }
 
     pub fn hash(&self) -> [u8; 32] {

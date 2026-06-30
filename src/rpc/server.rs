@@ -4,10 +4,12 @@ use tokio::sync::RwLock;
 use chrono::{DateTime, FixedOffset};
 
 use crate::chain::blockchain::Blockchain;
+use crate::chain::transaction::Transaction;
 use crate::wallet::Wallet;
 use crate::p2p::P2PNetwork;
 use crate::pool::PoolServer;
 use crate::storage::db::Storage;
+use crate::vm::wasm::{WasmRuntime, ContractContext};
 
 pub struct RpcServer {
     pub blockchain: Arc<RwLock<Blockchain>>,
@@ -606,6 +608,229 @@ async fn handle_rpc_request(
                 }
             } else {
                 serde_json::json!({"error": format!("Invalid address: {}", to_address)})
+            }
+        }
+        "deploycontract" => {
+            let code_hex = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
+            let args_hex = params.get(1).and_then(|p| p.as_str()).unwrap_or("");
+            let fee = params.get(2).and_then(|p| p.as_u64()).unwrap_or(1000);
+            let code = match hex::decode(code_hex) {
+                Ok(c) => c,
+                Err(_) => return serde_json::json!({"error": "Invalid code hex"}),
+            };
+            let args = match hex::decode(args_hex) {
+                Ok(a) => a,
+                Err(_) => return serde_json::json!({"error": "Invalid args hex"}),
+            };
+            let w = wallet.read().await;
+            let w_ref = match w.as_ref() {
+                Some(w) => w,
+                None => return serde_json::json!({"error": "No wallet loaded"}),
+            };
+            let sender_kp = match w_ref.keypair() {
+                Ok(kp) => kp,
+                Err(_) => return serde_json::json!({"error": "Invalid wallet keypair"}),
+            };
+            let needed = fee;
+            if needed > w_ref.balance {
+                return serde_json::json!({"error": "Insufficient balance"});
+            }
+            let utxos = w_ref.get_utxos_for_amount(needed);
+            drop(w);
+            let tx = Transaction::contract_deploy(&sender_kp, code.clone(), args, fee, &utxos);
+            let tx_hash = tx.hash();
+            let addr = crate::vm::wasm::contract_address(&tx_hash, {
+                blockchain.read().await.state.height + 1
+            });
+            let mut w = wallet.write().await;
+            if let Some(ref mut wallet) = *w {
+                for (outpoint, _) in &utxos {
+                    let key = format!("{}:{}", hex::encode(outpoint.tx_hash), outpoint.index);
+                    wallet.utxos.remove(&key);
+                }
+                wallet.transactions.push(tx_hash);
+                wallet.balance = wallet.utxos.values().map(|(_, a)| a).sum();
+            }
+            drop(w);
+            if let Some(ref st) = storage {
+                let w = wallet.read().await;
+                if let Some(ref wlt) = *w {
+                    if let Ok(s) = st.lock() {
+                        let _ = s.save_wallet(wlt);
+                        let _ = s.save_transaction(&tx);
+                        let _ = s.flush();
+                    }
+                }
+            }
+            p2p.broadcast_transaction(&tx).await;
+            let _ = p2p.add_to_mempool(tx.clone()).await;
+            serde_json::json!({
+                "tx_hash": hex::encode(tx_hash),
+                "contract_address": hex::encode(addr),
+                "code_size": code.len(),
+            })
+        }
+        "callcontract" => {
+            let addr_hex = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
+            let function = params.get(1).and_then(|p| p.as_str()).unwrap_or("");
+            let args_hex = params.get(2).and_then(|p| p.as_str()).unwrap_or("");
+            let fee = params.get(3).and_then(|p| p.as_u64()).unwrap_or(1000);
+            let contract_addr = match hex::decode(addr_hex) {
+                Ok(b) if b.len() == 32 => {
+                    let mut a = [0u8; 32];
+                    a.copy_from_slice(&b);
+                    a
+                }
+                _ => return serde_json::json!({"error": "Invalid contract address"}),
+            };
+            let args = match hex::decode(args_hex) {
+                Ok(a) => a,
+                Err(_) => return serde_json::json!({"error": "Invalid args hex"}),
+            };
+            let w = wallet.read().await;
+            let w_ref = match w.as_ref() {
+                Some(w) => w,
+                None => return serde_json::json!({"error": "No wallet loaded"}),
+            };
+            let sender_kp = match w_ref.keypair() {
+                Ok(kp) => kp,
+                Err(_) => return serde_json::json!({"error": "Invalid wallet keypair"}),
+            };
+            let needed = fee;
+            if needed > w_ref.balance {
+                return serde_json::json!({"error": "Insufficient balance"});
+            }
+            let utxos = w_ref.get_utxos_for_amount(needed);
+            drop(w);
+            let tx = Transaction::contract_call(&sender_kp, contract_addr, function, args, fee, &utxos);
+            let tx_hash = tx.hash();
+            let mut w = wallet.write().await;
+            if let Some(ref mut wallet) = *w {
+                for (outpoint, _) in &utxos {
+                    let key = format!("{}:{}", hex::encode(outpoint.tx_hash), outpoint.index);
+                    wallet.utxos.remove(&key);
+                }
+                wallet.transactions.push(tx_hash);
+                wallet.balance = wallet.utxos.values().map(|(_, a)| a).sum();
+            }
+            drop(w);
+            if let Some(ref st) = storage {
+                let w = wallet.read().await;
+                if let Some(ref wlt) = *w {
+                    if let Ok(s) = st.lock() {
+                        let _ = s.save_wallet(wlt);
+                        let _ = s.save_transaction(&tx);
+                        let _ = s.flush();
+                    }
+                }
+            }
+            p2p.broadcast_transaction(&tx).await;
+            let _ = p2p.add_to_mempool(tx.clone()).await;
+            serde_json::json!({
+                "tx_hash": hex::encode(tx_hash),
+                "contract_address": addr_hex,
+                "function": function,
+            })
+        }
+        "getcontractstate" => {
+            let addr_hex = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
+            let contract_addr = match hex::decode(addr_hex) {
+                Ok(b) if b.len() == 32 => {
+                    let mut a = [0u8; 32];
+                    a.copy_from_slice(&b);
+                    a
+                }
+                _ => return serde_json::json!({"error": "Invalid contract address"}),
+            };
+            let state = match storage {
+                Some(ref st) => {
+                    if let Ok(s) = st.lock() {
+                        if let Ok(Some(data)) = s.load_contract_state(&contract_addr, ":all") {
+                            if let Ok(stored) = serde_json::from_slice::<std::collections::HashMap<String, String>>(&data) {
+                                stored
+                            } else {
+                                std::collections::HashMap::new()
+                            }
+                        } else {
+                            std::collections::HashMap::new()
+                        }
+                    } else {
+                        std::collections::HashMap::new()
+                    }
+                }
+                None => std::collections::HashMap::new(),
+            };
+            serde_json::json!({
+                "contract_address": addr_hex,
+                "state": state,
+            })
+        }
+        "callcontractview" => {
+            let addr_hex = params.get(0).and_then(|p| p.as_str()).unwrap_or("");
+            let function = params.get(1).and_then(|p| p.as_str()).unwrap_or("");
+            let args_hex = params.get(2).and_then(|p| p.as_str()).unwrap_or("");
+            let contract_addr = match hex::decode(addr_hex) {
+                Ok(b) if b.len() == 32 => {
+                    let mut a = [0u8; 32];
+                    a.copy_from_slice(&b);
+                    a
+                }
+                _ => return serde_json::json!({"error": "Invalid contract address"}),
+            };
+            let args = match hex::decode(args_hex) {
+                Ok(a) => a,
+                Err(_) => return serde_json::json!({"error": "Invalid args hex"}),
+            };
+            let code = match storage {
+                Some(ref st) => {
+                    if let Ok(s) = st.lock() {
+                        s.load_contract_code(&contract_addr).ok().flatten()
+                    } else { None }
+                }
+                None => None,
+            };
+            let code = match code {
+                Some(c) => c,
+                None => return serde_json::json!({"error": "Contract code not found"}),
+            };
+            let mut persist = std::collections::HashMap::new();
+            if let Some(ref st) = storage {
+                if let Ok(s) = st.lock() {
+                    if let Ok(Some(data)) = s.load_contract_state(&contract_addr, ":all") {
+                        if let Ok(stored) = serde_json::from_slice::<std::collections::HashMap<String, String>>(&data) {
+                            for (k, v) in stored {
+                                persist.insert(k, v.into_bytes());
+                            }
+                        }
+                    }
+                }
+            }
+            let fn_args = {
+                let mut b = function.as_bytes().to_vec();
+                b.push(0);
+                b.extend_from_slice(&args);
+                b
+            };
+            let mut ctx = ContractContext {
+                caller: [0u8; 32],
+                block_height: blockchain.read().await.state.height,
+                contract_address: contract_addr,
+                events: Vec::new(),
+                persist,
+            };
+            let runtime = match WasmRuntime::new() {
+                Ok(r) => r,
+                Err(_) => return serde_json::json!({"error": "WASM runtime init failed"}),
+            };
+            match runtime.call(&code, &fn_args, &mut ctx) {
+                Ok((gas_used, result)) => {
+                    serde_json::json!({
+                        "gas_used": gas_used,
+                        "result": hex::encode(result),
+                        "events": ctx.events.iter().map(|e| hex::encode(e)).collect::<Vec<_>>(),
+                    })
+                }
+                Err(e) => serde_json::json!({"error": e}),
             }
         }
         "getpoolstats" => {

@@ -121,6 +121,40 @@ impl Storage {
         }
     }
 
+    pub fn save_contract_code(&self, address: &[u8; 32], code: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        let key = format!("contract:code:{}", hex::encode(address));
+        self.db.insert(key.as_bytes(), code)?;
+        Ok(())
+    }
+
+    pub fn load_contract_code(&self, address: &[u8; 32]) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+        let key = format!("contract:code:{}", hex::encode(address));
+        match self.db.get(key.as_bytes())? {
+            Some(data) => Ok(Some(data.to_vec())),
+            None => Ok(None),
+        }
+    }
+
+    pub fn save_contract_state(&self, address: &[u8; 32], storage_key: &str, value: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        let key = format!("contract:state:{}:{}", hex::encode(address), storage_key);
+        self.db.insert(key.as_bytes(), value)?;
+        Ok(())
+    }
+
+    pub fn load_contract_state(&self, address: &[u8; 32], storage_key: &str) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+        let key = format!("contract:state:{}:{}", hex::encode(address), storage_key);
+        match self.db.get(key.as_bytes())? {
+            Some(data) => Ok(Some(data.to_vec())),
+            None => Ok(None),
+        }
+    }
+
+    pub fn delete_contract_state(&self, address: &[u8; 32], storage_key: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let key = format!("contract:state:{}:{}", hex::encode(address), storage_key);
+        self.db.remove(key.as_bytes())?;
+        Ok(())
+    }
+
     pub fn save_peers(&self, peers: &[SocketAddr]) -> Result<(), Box<dyn std::error::Error>> {
         let value = bincode::serialize(peers)?;
         self.db.insert(b"known_peers", value)?;

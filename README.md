@@ -8,8 +8,9 @@ A decentralized, mineable cryptocurrency for everyday use. CPU-friendly, ASIC-re
 
 - **PoW Mining** — CPU-friendly, ASIC-resistant (RandomX-style)
 - **Privacy** — Stealth addresses + ring signatures by default
+- **Confidential Transactions (RingCT)** — Hidden amounts with Pedersen commitments, range proofs, AOS ring signatures
 - **View Keys** — Optional transparency for auditing
-- **Smart Contracts** — WASM-based (in development)
+- **WASM Smart Contracts** — WebAssembly-based contracts with wasmtime runtime, fuel metering, and persistent KV storage
 - **P2P Network** — Decentralized peer-to-peer
 - **RPC API** — JSON-RPC + Web dashboard
 
@@ -239,13 +240,17 @@ curl -s http://localhost:9769/ -d '{"method":"getaddress","params":[],"id":1}'
 | `getaddress` | none | wallet address |
 | `getpoolstats` | none | pool miners, shares, current job |
 | `sendtoaddress` | [address, amount, fee?] | tx_hash, amount, fee, change |
+| `deploycontract` | [code_hex, args_hex, fee?] | tx_hash, contract_address, code_size |
+| `callcontract` | [address_hex, function, args_hex, fee?] | tx_hash, contract_address, function |
+| `callcontractview` | [address_hex, function, args_hex] | gas_used, result, events |
+| `getcontractstate` | [address_hex] | contract_address, state (key-value map) |
 
 ## Network
 
 - **P2P Port:** 9768 (TCP)
 - **RPC Port:** 9769 (TCP)
 - **Protocol:** TCP with length-prefixed bincode messages
-- **Message Types:** Ping/Pong, Block, Transaction, GetBlocks/Blocks, GetPeers/Peers
+- **Message Types:** Ping/Pong, Block, Transaction, GetBlocks/Blocks, GetPeers/Peers, MempoolRequest/MempoolResponse
 
 ### Port Forwarding
 
@@ -328,6 +333,82 @@ cargo build --release
 
 Addresses start with `OC` followed by 64 hex chars (32 bytes public key) + 8 hex chars (4 bytes checksum) — 74 characters total.
 
+## Smart Contracts
+
+OpenCoin supports **WASM smart contracts** compiled from any language that targets WebAssembly (Rust, C, C++, Go, etc.).
+
+### Contract Interface
+
+Contracts export two functions:
+- `init(args_ptr: i32, args_len: i32) -> i32` — constructor, called on deploy
+- `call(args_ptr: i32, args_len: i32) -> i32` — entry point for contract calls
+
+Host functions imported from `env`:
+- `read_storage(key_ptr, key_len, val_ptr, max_len) -> u32` — read from KV store
+- `write_storage(key_ptr, key_len, val_ptr, val_len)` — write to KV store
+- `get_caller(ptr, max_len) -> u32` — get caller address
+- `get_block_height() -> i64` — current block height
+- `get_contract_address(ptr, max_len) -> u32` — this contract's address
+- `emit_event(data_ptr, data_len)` — emit an event
+- `debug_log(ptr, len)` — log a message
+
+### Deploy a Contract
+
+```bash
+# Deploy WASM bytecode to the blockchain
+curl -s http://localhost:9769/ -d '{
+  "method":"deploycontract",
+  "params":["<wasm_hex>", "<constructor_args_hex>", 1000],
+  "id":1
+}'
+```
+
+### Call a Contract
+
+```bash
+# Call a function on a deployed contract
+curl -s http://localhost:9769/ -d '{
+  "method":"callcontract",
+  "params":["<contract_address_hex>", "my_function", "<args_hex>", 1000],
+  "id":1
+}'
+```
+
+### View Contract State
+
+```bash
+# Read-only call (no transaction created)
+curl -s http://localhost:9769/ -d '{
+  "method":"callcontractview",
+  "params":["<contract_address_hex>", "my_function", "<args_hex>"],
+  "id":1
+}'
+
+# Read contract storage state
+curl -s http://localhost:9769/ -d '{
+  "method":"getcontractstate",
+  "params":["<contract_address_hex>"],
+  "id":1
+}'
+```
+
+### Gas
+
+- **Deploy gas limit:** 200,000 fuel units
+- **Call gas limit:** 100,000 fuel units
+- Gas is metered via wasmtime's built-in fuel mechanism
+- Each WASM instruction consumes 1 fuel unit
+
+## Confidential Transactions (RingCT)
+
+OpenCoin supports **RingCT** (Ring Confidential Transactions) that hide transaction amounts:
+- **Pedersen commitments** — commit to an amount without revealing it: `C = x*G + a*H`
+- **Range proofs** — 64-bit bit-by-bit proofs proving amounts are non-negative
+- **AOS ring signatures** — hide the sender among a ring of decoy outputs
+- **Key images** — prevent double-spending within the ring
+
+Create RingCT transactions via RPC (TBD) or programmatically via `Transaction::transfer_private()`.
+
 ## Privacy Model
 
 OpenCoin uses **stealth addresses**:
@@ -358,8 +439,8 @@ MIT
 - [x] Fee market (higher-fee txs prioritized)
 - [x] Chain reorg handling
 - [x] Block explorer with tx details
-- [ ] WASM smart contracts
-- [ ] RingCT (confidential transactions)
+- [x] WASM smart contracts (wasmtime, fuel metering, persistent KV storage)
+- [x] RingCT (confidential transactions — Pedersen commitments, range proofs, ring signatures)
 - [ ] Mobile wallet
 - [ ] Exchange listings / CoinMarketCap
 - [ ] Light client (SPV)

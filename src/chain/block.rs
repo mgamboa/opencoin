@@ -48,6 +48,9 @@ impl Block {
             signatures: Vec::new(),
             ring_signature: None,
             memo: Some(String::from("Genesis")),
+            contract_code: None,
+            contract_address: None,
+            contract_fn: None,
         };
         let merkle = crate::crypto::hash::merkle_root(&[coinbase_tx.hash()]);
         Block {

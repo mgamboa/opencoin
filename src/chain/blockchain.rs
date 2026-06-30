@@ -9,6 +9,7 @@ use crate::chain::transaction::{TransactionType, TxOutput};
 use crate::crypto::hash::merkle_root;
 use crate::crypto::stealth::StealthAddress;
 use crate::storage::db::Storage;
+use crate::vm::wasm::{WasmRuntime, ContractContext};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockchainState {
@@ -157,6 +158,11 @@ impl Blockchain {
                     }
                 }
             }
+            if tx.tx_type == TransactionType::ContractDeploy || tx.tx_type == TransactionType::ContractCall {
+                if let Err(e) = tx.verify_signatures() {
+                    return Err(e);
+                }
+            }
         }
         if !coinbase_found {
             return Err("Missing coinbase transaction");
@@ -197,10 +203,72 @@ impl Blockchain {
             }
         }
 
+        struct ContractUpdate {
+            addr: [u8; 32],
+            code: Option<Vec<u8>>,
+            persist: HashMap<String, Vec<u8>>,
+        }
+        let mut contract_updates: Vec<ContractUpdate> = Vec::new();
+        for tx in &block.transactions {
+            if tx.tx_type == TransactionType::ContractDeploy {
+                if let Some(ref code) = tx.contract_code {
+                    let addr = crate::vm::wasm::contract_address(&tx.hash(), block.header.height);
+                    let persist = HashMap::new();
+                    let mut ctx = ContractContext {
+                        caller: [0u8; 32],
+                        block_height: block.header.height,
+                        contract_address: addr,
+                        events: Vec::new(),
+                        persist,
+                    };
+                    let runtime = WasmRuntime::new().map_err(|_| "WASM runtime init failed")?;
+                    runtime.deploy(code, tx.contract_fn.as_ref().map(|s| s.as_bytes()).unwrap_or(b""), &mut ctx).map_err(|_| "Contract deploy failed")?;
+                    contract_updates.push(ContractUpdate { addr, code: Some(code.clone()), persist: ctx.persist });
+                }
+            }
+            if tx.tx_type == TransactionType::ContractCall {
+                if let Some(addr) = tx.contract_address {
+                    let code = if let Some(ref storage) = self.storage {
+                        if let Ok(s) = storage.lock() {
+                            s.load_contract_code(&addr).ok().flatten()
+                        } else { None }
+                    } else { None };
+                    let code = code.ok_or("Contract code not found")?;
+                    let persist = HashMap::new();
+                    let mut ctx = ContractContext {
+                        caller: [0u8; 32],
+                        block_height: block.header.height,
+                        contract_address: addr,
+                        events: Vec::new(),
+                        persist,
+                    };
+                    let fn_args = tx.contract_fn.as_ref().map(|f| {
+                        let mut b = f.as_bytes().to_vec();
+                        b.push(0);
+                        b
+                    }).unwrap_or_default();
+                    let runtime = WasmRuntime::new().map_err(|_| "WASM runtime init failed")?;
+                    runtime.call(&code, &fn_args, &mut ctx).map_err(|_| "Contract call failed")?;
+                    contract_updates.push(ContractUpdate { addr, code: None, persist: ctx.persist });
+                }
+            }
+        }
+
         if let Some(ref storage) = self.storage {
             if let Ok(s) = storage.lock() {
                 let _ = s.save_block(&block);
                 let _ = s.save_blockchain_state(&self.state);
+                for update in &contract_updates {
+                    if let Some(ref c) = update.code {
+                        let _ = s.save_contract_code(&update.addr, c);
+                    }
+                    if !update.persist.is_empty() {
+                        let serialized = serde_json::to_vec(
+                            &update.persist.iter().map(|(k, v)| (k.clone(), String::from_utf8_lossy(v).to_string())).collect::<HashMap<_, _>>()
+                        ).unwrap_or_default();
+                        let _ = s.save_contract_state(&update.addr, ":all", &serialized);
+                    }
+                }
                 let _ = s.flush();
             }
         }

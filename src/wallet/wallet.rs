@@ -112,6 +112,9 @@ impl Wallet {
             signatures: Vec::new(),
             ring_signature: None,
             memo: None,
+            contract_code: None,
+            contract_address: None,
+            contract_fn: None,
         })
     }
 
