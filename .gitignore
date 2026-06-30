@@ -6,5 +6,6 @@
 !mobile/package.json
 !mobile/package-lock.json
 OPENCOIN_WALLET_*.txt
+*.apk
 SESSION-SUMMARY-*.md
 docs/exchange/
