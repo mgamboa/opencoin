@@ -14,7 +14,7 @@ use crate::chain::blockchain::Blockchain;
 use crate::crypto::hash::merkle_root;
 use crate::crypto::stealth::StealthAddress;
 use crate::consensus::difficulty::{calculate_difficulty, difficulty_to_compact};
-use crate::consensus::pow::{calculate_target, check_pow};
+use crate::consensus::pow::calculate_target;
 use crate::p2p::P2PNetwork;
 use crate::wallet::Wallet;
 use crate::storage::db::Storage;
@@ -101,7 +101,7 @@ impl PoolServer {
         let job_counter = self.job_counter.clone();
         let p2p = self.p2p.clone();
 
-        let updater = tokio::spawn(async move {
+        let _updater = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 let bc = blockchain.read().await;
@@ -191,12 +191,11 @@ impl PoolServer {
         }
     }
 
-    async fn handle_miner(&self, mut stream: TcpStream, addr: SocketAddr) {
+    async fn handle_miner(&self, stream: TcpStream, addr: SocketAddr) {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
         let miners = self.miners.clone();
         let current_template = self.current_template.clone();
-        let blockchain = self.blockchain.clone();
         let total_shares = self.total_shares.clone();
         let pool_address = self.pool_address.clone();
         let p2p = self.p2p.clone();
@@ -230,7 +229,6 @@ impl PoolServer {
         }
         drop(template);
 
-        let miner_info = self.miners.clone();
         let ct = self.current_template.clone();
         let bc2 = self.blockchain.clone();
         let round_shares = self.round_shares.clone();
@@ -239,7 +237,6 @@ impl PoolServer {
         let storage = self.storage.clone();
 
         tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
             let mut reader = BufReader::new(read_half);
             let mut line = String::new();
 
@@ -329,9 +326,6 @@ impl PoolServer {
                                                 recipients.push((pool_address.clone(), pool_fee));
 
                                                 let coinbase = Transaction::coinbase_multi_output(&recipients);
-                                                let tx_hashes = vec![coinbase.hash()];
-                                                let merkle = merkle_root(&tx_hashes);
-
                                                 let mut all_txs = vec![coinbase];
                                                 all_txs.extend(t.mempool_txs.clone());
                                                 let all_tx_hashes: Vec<[u8; 32]> = all_txs.iter().map(|t| t.hash()).collect();

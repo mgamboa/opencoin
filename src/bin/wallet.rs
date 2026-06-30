@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use opencoin::crypto::keys::{KeyPair, SecretKey, PublicKey, generate_keypair};
+use opencoin::crypto::keys::generate_keypair;
 use opencoin::chain::address::OpenCoinAddress;
 use opencoin::wallet::Wallet;
 

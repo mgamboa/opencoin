@@ -53,7 +53,7 @@ pub fn create_stealth_output(
     amount: u64,
 ) -> (OneTimeOutput, Scalar) {
     let r = generate_random_scalar();
-    let rG = EdwardsPoint::mul_base(&r);
+    let r_g = EdwardsPoint::mul_base(&r);
 
     let spend_point = CompressedEdwardsY(recipient.spend_pub.0)
         .decompress()
@@ -76,7 +76,7 @@ pub fn create_stealth_output(
     let amount_commitment = blake3_hash(&amount.to_le_bytes());
 
     let output = OneTimeOutput {
-        ephemeral_pub: EphemeralPublicKey(PublicKey(rG.compress().to_bytes())),
+        ephemeral_pub: EphemeralPublicKey(PublicKey(r_g.compress().to_bytes())),
         key_image,
         amount_commitment,
     };
@@ -90,11 +90,11 @@ pub fn recover_stealth_output(
     recipient_stealth: &StealthAddress,
 ) -> Option<PublicKey> {
     let view_sk = Scalar::from_bytes_mod_order(private_view.0);
-    let rG = CompressedEdwardsY(output.ephemeral_pub.0 .0)
+    let r_g = CompressedEdwardsY(output.ephemeral_pub.0 .0)
         .decompress()
         .unwrap();
 
-    let dh_shared = view_sk * rG;
+    let dh_shared = view_sk * r_g;
     let shared_hash = blake3_hash(dh_shared.compress().as_bytes());
     let shared_scalar = Scalar::from_bytes_mod_order(shared_hash);
 

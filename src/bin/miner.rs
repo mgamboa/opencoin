@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use std::time::{SystemTime, Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -98,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let current_job = Arc::new(tokio::sync::RwLock::new(None::<PoolJob>));
 
     let reader_job = current_job.clone();
-    let reader_task = tokio::spawn(async move {
+    let _reader_task = tokio::spawn(async move {
         let mut lines = BufReader::new(read_half).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if line.trim().is_empty() { continue; }
@@ -208,6 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct PoolJob {
     job_id: u64,
     height: u64,

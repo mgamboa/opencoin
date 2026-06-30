@@ -12,8 +12,6 @@ use crate::chain::blockchain::Blockchain;
 use crate::wallet::Wallet;
 use crate::storage::db::Storage;
 
-type PeerMap = HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
     Ping(u64),
@@ -185,7 +183,6 @@ impl P2PNetwork {
         let our_addr = self.our_address;
 
         tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
             let mut read_half = read_half;
             loop {
                 let result = read_message_inner(&mut read_half).await;
@@ -407,8 +404,22 @@ async fn handle_message2(
             }
             info!("Discovered {} peers from {}", count, addr);
         }
-        Message::MempoolRequest => {}
-        Message::MempoolResponse(_) => {}
+        Message::MempoolRequest => {
+            if let Some(tx) = peers.get(addr) {
+                let mp = mempool.read().await;
+                let resp = bincode::serialize(&Message::MempoolResponse(mp.clone())).unwrap();
+                let _ = tx.send(encode_length_prefixed(&resp));
+            }
+        }
+        Message::MempoolResponse(txs) => {
+            let mut mp = mempool.write().await;
+            for tx in txs {
+                if !mp.iter().any(|t| t.hash() == tx.hash()) {
+                    mp.push(tx);
+                }
+            }
+            info!("Received {} mempool transactions from {}", mp.len(), addr);
+        }
         Message::Transaction(tx) => {
             info!("Received transaction from {}: {}", addr, hex::encode(tx.hash()));
             let mut mp = mempool.write().await;

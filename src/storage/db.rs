@@ -1,7 +1,5 @@
 use std::net::SocketAddr;
 use sled::Db;
-use std::path::Path;
-use serde::{Deserialize, Serialize};
 
 use crate::chain::block::Block;
 use crate::chain::transaction::Transaction;

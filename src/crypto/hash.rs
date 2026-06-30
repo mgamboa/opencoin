@@ -1,4 +1,3 @@
-use blake3::Hash as Blake3Hash;
 use sha3::{Digest, Sha3_256, Sha3_512};
 
 pub fn blake3_hash(data: &[u8]) -> [u8; 32] {

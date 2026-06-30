@@ -1,4 +1,3 @@
-use crate::config;
 use crate::chain::block::Block;
 
 pub fn check_pow(block: &Block, target: u64) -> bool {

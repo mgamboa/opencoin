@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::RwLock;
-use chrono::{DateTime, FixedOffset, NaiveDateTime};
+use chrono::{DateTime, FixedOffset};
 
 use crate::chain::blockchain::Blockchain;
 use crate::wallet::Wallet;
@@ -157,8 +157,8 @@ async fn handle_connection(
 
 fn format_timestamp(ts: u64) -> String {
     let aest = FixedOffset::east_opt(10 * 3600).unwrap_or(FixedOffset::east_opt(0).unwrap());
-    let naive = NaiveDateTime::from_timestamp_opt(ts as i64, 0).unwrap_or_default();
-    let dt: DateTime<FixedOffset> = DateTime::from_naive_utc_and_offset(naive, aest);
+    let utc_dt = DateTime::from_timestamp(ts as i64, 0).unwrap_or_default();
+    let dt = utc_dt.with_timezone(&aest);
     dt.format("%d/%m/%Y %I:%M:%S %p AEST").to_string()
 }
 

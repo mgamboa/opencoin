@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use crate::config;
 use crate::consensus::pow::check_pow;
-use crate::chain::block::{is_genesis_block, Block, calculate_block_reward};
-use crate::chain::transaction::{Transaction, TransactionType};
+use crate::chain::block::{Block, calculate_block_reward};
+use crate::chain::transaction::{TransactionType, TxOutput};
 use crate::crypto::hash::merkle_root;
 use crate::crypto::stealth::StealthAddress;
 use crate::storage::db::Storage;
@@ -21,7 +21,7 @@ pub struct BlockchainState {
 
 pub struct Blockchain {
     pub blocks: Vec<Block>,
-    pub utxo_set: HashMap<String, Transaction>,
+    pub utxo_set: HashMap<String, TxOutput>,
     pub state: BlockchainState,
     pub premine_address: StealthAddress,
     pub storage: Option<Arc<std::sync::Mutex<Storage>>>,
@@ -79,7 +79,14 @@ impl Blockchain {
         for block in &blocks {
             for tx in &block.transactions {
                 if tx.tx_type != TransactionType::Coinbase {
-                    utxo_set.insert(hex::encode(tx.hash()), tx.clone());
+                    for (i, output) in tx.outputs.iter().enumerate() {
+                        let utxo_key = format!("{}:{}", hex::encode(tx.hash()), i);
+                        utxo_set.insert(utxo_key, output.clone());
+                    }
+                }
+                for input in &tx.inputs {
+                    let spent_key = format!("{}:{}", hex::encode(input.outpoint.tx_hash), input.outpoint.index);
+                    utxo_set.remove(&spent_key);
                 }
             }
         }
@@ -154,7 +161,10 @@ impl Blockchain {
 
         for tx in &block.transactions {
             if tx.tx_type != TransactionType::Coinbase {
-                self.utxo_set.insert(hex::encode(tx.hash()), tx.clone());
+                for (i, output) in tx.outputs.iter().enumerate() {
+                    let utxo_key = format!("{}:{}", hex::encode(tx.hash()), i);
+                    self.utxo_set.insert(utxo_key, output.clone());
+                }
             }
             for input in &tx.inputs {
                 let spent_key = format!("{}:{}", hex::encode(input.outpoint.tx_hash), input.outpoint.index);
@@ -203,30 +213,67 @@ impl Blockchain {
                 return Err("Block does not meet difficulty target");
             }
         }
+
+        let common_height = new_blocks.first().map(|b| {
+            if b.header.height == 0 { 0 }
+            else { b.header.height - 1 }
+        }).unwrap_or(0);
+
+        let old_tip_height = self.state.height;
+        let mut reorg_blocks: Vec<Block> = Vec::new();
+        if common_height < old_tip_height {
+            for h in (common_height + 1)..=old_tip_height {
+                if let Some(b) = self.get_block(h).cloned() {
+                    reorg_blocks.push(b);
+                }
+            }
+        }
+
         for block in &new_blocks {
             let height = block.header.height;
-            if height <= self.state.height {
+            if height <= old_tip_height {
                 if let Some(existing) = self.get_block(height) {
                     if existing.hash() != block.hash() {
                         let idx = self.blocks.iter().position(|b| b.header.height == height).unwrap();
                         self.blocks.remove(idx);
-                        let _ = self.blocks.push(block.clone());
+                        self.blocks.push(block.clone());
                     }
                 }
             } else {
                 self.blocks.push(block.clone());
-                self.state.height = block.header.height;
-                self.state.current_hash = block.hash();
-                self.state.total_work += 1u128 << (64 - block.header.difficulty_target);
-                for tx in &block.transactions {
-                    if tx.tx_type == TransactionType::Coinbase {
-                        self.state.circulating_supply += tx.total_output();
+            }
+        }
+
+        self.utxo_set.clear();
+        let mut sorted: Vec<&Block> = self.blocks.iter().filter(|b| b.header.height > 0).collect();
+        sorted.sort_by_key(|b| b.header.height);
+        for block in &sorted {
+            for tx in &block.transactions {
+                if tx.tx_type != TransactionType::Coinbase {
+                    for (i, output) in tx.outputs.iter().enumerate() {
+                        let utxo_key = format!("{}:{}", hex::encode(tx.hash()), i);
+                        self.utxo_set.insert(utxo_key, output.clone());
                     }
+                }
+                for input in &tx.inputs {
+                    let spent_key = format!("{}:{}", hex::encode(input.outpoint.tx_hash), input.outpoint.index);
+                    self.utxo_set.remove(&spent_key);
                 }
             }
         }
+
         self.state.current_hash = new_last.hash();
         self.state.height = new_last.header.height;
+        self.state.total_work = self.blocks.iter()
+            .filter(|b| b.header.height > 0)
+            .map(|b| 1u128 << (64 - b.header.difficulty_target))
+            .sum();
+        self.state.circulating_supply = self.blocks.iter()
+            .flat_map(|b| &b.transactions)
+            .filter(|t| t.tx_type == TransactionType::Coinbase)
+            .map(|t| t.total_output())
+            .sum();
+
         Ok(())
     }
 

@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::crypto::keys::{KeyPair, PublicKey, SecretKey, generate_keypair, public_key_to_address};
-use crate::crypto::stealth::{StealthAddress, create_stealth_output, recover_stealth_output, OneTimeOutput};
-use crate::chain::transaction::{OutPoint, Transaction, TransactionType, TxInput, TxOutput};
+
+use crate::crypto::keys::{KeyPair, SecretKey, generate_keypair, public_key_to_address};
+use crate::crypto::stealth::{StealthAddress, create_stealth_output};
+use crate::chain::transaction::{OutPoint, Transaction, TransactionType, TxOutput};
 use crate::chain::block::Block;
 use crate::chain::address::OpenCoinAddress;
 
@@ -56,7 +56,6 @@ impl Wallet {
     }
 
     pub fn keypair(&self) -> Result<KeyPair, &'static str> {
-        let pub_key = PublicKey::from_bytes(&self.keypair_data.public)?;
         let sec_key = SecretKey::from_bytes(&self.keypair_data.secret)?;
         Ok(KeyPair::from_secret_key(&sec_key))
     }
