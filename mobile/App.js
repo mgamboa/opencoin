@@ -1,12 +1,13 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
+import { View, Text, ActivityIndicator, StyleSheet } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Text } from 'react-native';
 import DashboardScreen from './src/screens/DashboardScreen';
 import SendScreen from './src/screens/SendScreen';
 import ReceiveScreen from './src/screens/ReceiveScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
+import { discoverNode } from './src/services/rpc';
 
 const Tab = createBottomTabNavigator();
 
@@ -20,7 +21,40 @@ function TabIcon({ label, focused }) {
   return <Text style={{ fontSize: 22, color: focused ? '#f7931a' : '#484f58' }}>{icons[label]}</Text>;
 }
 
+function SplashScreen() {
+  return (
+    <View style={splash.container}>
+      <ActivityIndicator size="large" color="#f7931a" />
+      <Text style={splash.text}>Discovering node...</Text>
+    </View>
+  );
+}
+
 export default function App() {
+  const [ready, setReady] = useState(false);
+  const [splashError, setSplashError] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        await discoverNode();
+        setReady(true);
+      } catch (e) {
+        setSplashError(e.message);
+        setReady(true);
+      }
+    })();
+  }, []);
+
+  if (!ready) {
+    return (
+      <>
+        <StatusBar style="light" />
+        <SplashScreen />
+      </>
+    );
+  }
+
   return (
     <>
       <StatusBar style="light" />
@@ -44,3 +78,8 @@ export default function App() {
     </>
   );
 }
+
+const splash = StyleSheet.create({
+  container: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0d1117' },
+  text: { color: '#8b949e', marginTop: 12, fontSize: 16 },
+});

@@ -4,6 +4,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { fetchWalletData } from '../services/wallet';
+import { getNodeUrl } from '../services/rpc';
 
 export default function DashboardScreen({ navigation }) {
   const [data, setData] = useState(null);
@@ -76,7 +77,7 @@ export default function DashboardScreen({ navigation }) {
             </Text>
           </View>
           <View style={styles.card}>
-            <Text style={styles.label}>Node</Text>
+            <Text style={styles.label}>Node — {getNodeUrl()}</Text>
             <Text style={styles.infoText}>
               Height: {data.info.height} | Supply: {(data.info.circulating_supply / 1e8).toFixed(0)} OPC
             </Text>

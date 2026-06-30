@@ -1,4 +1,18 @@
-import { getBalance, getAddress, getInfo, sendToAddress } from './rpc';
+import { getBalance, getAddress, getInfo, sendToAddress, discoverNode } from './rpc';
+
+export async function connectAndFetch() {
+  try {
+    const discovery = await discoverNode();
+    const [balance, address, info] = await Promise.all([
+      getBalance(),
+      getAddress(),
+      getInfo(),
+    ]);
+    return { info, balance, address, url: discovery.url, error: null };
+  } catch (e) {
+    return { info: null, balance: null, address: null, url: null, error: e.message };
+  }
+}
 
 export async function fetchWalletData() {
   try {

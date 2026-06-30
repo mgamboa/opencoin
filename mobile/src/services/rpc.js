@@ -1,13 +1,36 @@
-const DEFAULT_NODE_URL = 'http://192.168.2.10:8545';
+import seeds from '../../seeds.json';
 
-let nodeUrl = DEFAULT_NODE_URL;
+let seedsList = [...seeds];
+let nodeUrl = seedsList[0] || 'http://localhost:9769';
 
 export function setNodeUrl(url) {
   nodeUrl = url;
+  if (!seedsList.includes(url)) {
+    seedsList.unshift(url);
+  }
 }
 
 export function getNodeUrl() {
   return nodeUrl;
+}
+
+export async function discoverNode() {
+  for (const url of seedsList) {
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getinfo', params: [] }),
+        signal: AbortSignal.timeout(3000),
+      });
+      const data = await resp.json();
+      if (data && data.result) {
+        nodeUrl = url;
+        return { url, info: data.result };
+      }
+    } catch (_) {}
+  }
+  throw new Error('No reachable node found');
 }
 
 export async function rpcCall(method, params = []) {
@@ -20,9 +43,10 @@ export async function rpcCall(method, params = []) {
       method,
       params,
     }),
+    signal: AbortSignal.timeout(5000),
   });
   const data = await response.json();
-  if (data.error) throw new Error(data.error);
+  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
   return data.result;
 }
 
