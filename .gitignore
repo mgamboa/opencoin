@@ -3,6 +3,8 @@
 !mobile/seeds.json
 !mobile/app.json
 !mobile/eas.json
+!mobile/package.json
+!mobile/package-lock.json
 OPENCOIN_WALLET_*.txt
 SESSION-SUMMARY-*.md
 docs/exchange/
