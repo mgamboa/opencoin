@@ -92,6 +92,8 @@ impl Wallet {
                 stealth_address: recipient.clone(),
                 one_time_output: output,
                 amount: *amount,
+                commitment: None,
+                range_proof: None,
                 view_key_proof: None,
             });
             total_out += amount;
@@ -108,6 +110,7 @@ impl Wallet {
                 .unwrap()
                 .as_secs(),
             signatures: Vec::new(),
+            ring_signature: None,
             memo: None,
         })
     }

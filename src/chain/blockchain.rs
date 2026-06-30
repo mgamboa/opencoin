@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::config;
@@ -22,6 +22,7 @@ pub struct BlockchainState {
 pub struct Blockchain {
     pub blocks: Vec<Block>,
     pub utxo_set: HashMap<String, TxOutput>,
+    pub key_images: HashSet<[u8; 32]>,
     pub state: BlockchainState,
     pub premine_address: StealthAddress,
     pub storage: Option<Arc<std::sync::Mutex<Storage>>>,
@@ -34,6 +35,7 @@ impl Blockchain {
         let mut bc = Blockchain {
             blocks: vec![genesis],
             utxo_set: HashMap::new(),
+            key_images: HashSet::new(),
             state: BlockchainState {
                 height: 0,
                 current_hash: [0u8; 32],
@@ -76,6 +78,7 @@ impl Blockchain {
             blocks.insert(0, Block::genesis());
         }
         let mut utxo_set = HashMap::new();
+        let mut key_images = HashSet::new();
         for block in &blocks {
             for tx in &block.transactions {
                 if tx.tx_type != TransactionType::Coinbase {
@@ -87,6 +90,7 @@ impl Blockchain {
                 for input in &tx.inputs {
                     let spent_key = format!("{}:{}", hex::encode(input.outpoint.tx_hash), input.outpoint.index);
                     utxo_set.remove(&spent_key);
+                    key_images.insert(input.key_image.0);
                 }
             }
         }
@@ -94,6 +98,7 @@ impl Blockchain {
         Ok(Some(Blockchain {
             blocks,
             utxo_set,
+            key_images,
             state: BlockchainState {
                 height: state.height,
                 current_hash,
@@ -135,6 +140,23 @@ impl Blockchain {
                     return Err(e);
                 }
             }
+            if tx.tx_type == TransactionType::Private {
+                if let Err(e) = tx.verify_signatures() {
+                    return Err(e);
+                }
+                for output in &tx.outputs {
+                    if let Some(ref rp) = output.range_proof {
+                        if !rp.verify() {
+                            return Err("Private tx range proof verification failed");
+                        }
+                    }
+                }
+                for input in &tx.inputs {
+                    if self.key_images.contains(&input.key_image.0) {
+                        return Err("Double spend: key image already used");
+                    }
+                }
+            }
         }
         if !coinbase_found {
             return Err("Missing coinbase transaction");
@@ -169,6 +191,9 @@ impl Blockchain {
             for input in &tx.inputs {
                 let spent_key = format!("{}:{}", hex::encode(input.outpoint.tx_hash), input.outpoint.index);
                 self.utxo_set.remove(&spent_key);
+                if tx.tx_type == TransactionType::Private {
+                    self.key_images.insert(input.key_image.0);
+                }
             }
         }
 

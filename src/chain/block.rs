@@ -39,11 +39,14 @@ impl Block {
                     amount_commitment: [0u8; 32],
                 },
                 amount: 0,
+                commitment: None,
+                range_proof: None,
                 view_key_proof: None,
             }],
             fee: 0,
             timestamp: 0,
             signatures: Vec::new(),
+            ring_signature: None,
             memo: Some(String::from("Genesis")),
         };
         let merkle = crate::crypto::hash::merkle_root(&[coinbase_tx.hash()]);
