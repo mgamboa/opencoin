@@ -28,6 +28,16 @@
         "projectId": "19b3d525-7e46-425f-96d8-86f99a47d991"
       }
     },
-    "owner": "mgamboap"
+    "owner": "mgamboap",
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ]
   }
 }
