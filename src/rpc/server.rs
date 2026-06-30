@@ -186,7 +186,7 @@ const DOWNLOAD_HTML: &str = r##"
 <div class=card><h2>Download OpenCoin</h2>
 <p>Build from source or download the mobile wallet APK.</p></div>
 <div class=card><h3>Mobile Wallet (Android APK)</h3>
-<a class=btn href="//144.6.203.69:9770/OpenCoin-Wallet-v1.0.0.apk" download>Download OpenCoin Wallet v1.0.0 (APK, 79 MB)</a>
+<a class=btn href="//144.6.203.69:9770/OpenCoin-Wallet-v1.0.1.apk" download>Download OpenCoin Wallet v1.0.1 (APK, 79 MB)</a>
 <p style="margin-top:8px;color:#8b949e;font-size:13px">OpenCoin Wallet for Android. Install the APK on your device to send, receive, and monitor your balance.</p></div>
 <div class=card><h3>Source Code</h3>
 <pre>git clone https://github.com/mgamboa/opencoin.git

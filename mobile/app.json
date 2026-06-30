@@ -37,7 +37,8 @@
             "usesCleartextTraffic": true
           }
         }
-      ]
+      ],
+      "./with-cleartext-traffic.js"
     ]
   }
 }
