@@ -49,6 +49,8 @@ enum Commands {
         pool_port: u16,
         #[arg(long)]
         pool_address: Option<String>,
+        #[arg(long)]
+        public_ip: Option<String>,
     },
     GenerateGenesis {
         #[arg(long)]
@@ -64,8 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Start { data_dir, p2p_port, rpc_port, peer, seed, mine, premine_key, pool, pool_port, pool_address } => {
-            run_node(&data_dir, p2p_port, rpc_port, peer.as_deref(), &seed, mine, premine_key, pool, pool_port, pool_address).await?;
+        Commands::Start { data_dir, p2p_port, rpc_port, peer, seed, mine, premine_key, pool, pool_port, pool_address, public_ip } => {
+            run_node(&data_dir, p2p_port, rpc_port, peer.as_deref(), &seed, mine, premine_key, pool, pool_port, pool_address, public_ip).await?;
         }
         Commands::GenerateGenesis { premine_address, output } => {
             generate_genesis(&premine_address, &output)?;
@@ -86,6 +88,7 @@ async fn run_node(
     enable_pool: bool,
     pool_port: u16,
     pool_address: Option<String>,
+    public_ip: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let expanded_dir = shellexpand::tilde(data_dir).to_string();
     std::fs::create_dir_all(&expanded_dir)?;
@@ -182,8 +185,19 @@ async fn run_node(
             None
         }
     }));
+    let public_ip_addr: Option<std::net::SocketAddr> = public_ip.as_ref().and_then(|ip| {
+        let with_port = if ip.contains(':') { ip.clone() } else { format!("{}:{}", ip, p2p_port) };
+        match with_port.parse() {
+            Ok(a) => { info!("Public IP: {}", a); Some(a) }
+            Err(e) => { warn!("Invalid public IP '{}': {}", ip, e); None }
+        }
+    });
+
     let p2p = {
         let mut p = P2PNetwork::new(p2p_port, blockchain.clone()).with_wallet(wallet.clone());
+        if let Some(ip) = public_ip_addr {
+            p = p.with_public_ip(ip);
+        }
         if let Some(ref storage) = storage {
             p = p.with_storage(storage.clone());
         }
@@ -212,7 +226,7 @@ async fn run_node(
                 }
             }
         };
-        let mut pool = PoolServer::new(pool_port, pool_addr_stealth, blockchain.clone()).with_p2p(p2p.clone()).with_wallet(wallet.clone());
+        let mut pool = PoolServer::new(pool_port, pool_addr_stealth, blockchain.clone()).with_p2p(p2p.clone());
         if let Some(ref storage) = storage {
             pool = pool.with_storage(storage.clone());
         }

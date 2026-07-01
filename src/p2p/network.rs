@@ -9,9 +9,12 @@ use log::{info, warn, error};
 use crate::chain::block::{Block, BlockHeader};
 use crate::chain::transaction::Transaction;
 use crate::chain::blockchain::Blockchain;
+use crate::config;
 use crate::crypto::bloom::BloomFilter;
 use crate::wallet::Wallet;
 use crate::storage::db::Storage;
+
+const PEER_TIMEOUT_SECS: u64 = 180;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
@@ -41,7 +44,9 @@ pub struct P2PNetwork {
     pub peers: Arc<RwLock<HashMap<SocketAddr, mpsc::UnboundedSender<Vec<u8>>>>>,
     pub mempool: Arc<RwLock<Vec<Transaction>>>,
     pub our_address: SocketAddr,
+    pub public_ip: Option<SocketAddr>,
     pub known_peers: Arc<RwLock<Vec<SocketAddr>>>,
+    pub peer_last_seen: Arc<RwLock<HashMap<SocketAddr, tokio::time::Instant>>>,
     pub blockchain: Arc<RwLock<Blockchain>>,
     pub wallet: Option<Arc<RwLock<Option<Wallet>>>>,
     pub storage: Option<Arc<std::sync::Mutex<Storage>>>,
@@ -53,11 +58,18 @@ impl P2PNetwork {
             peers: Arc::new(RwLock::new(HashMap::new())),
             mempool: Arc::new(RwLock::new(Vec::new())),
             our_address: format!("0.0.0.0:{}", port).parse().unwrap(),
+            public_ip: None,
             known_peers: Arc::new(RwLock::new(Vec::new())),
+            peer_last_seen: Arc::new(RwLock::new(HashMap::new())),
             blockchain,
             wallet: None,
             storage: None,
         }
+    }
+
+    pub fn with_public_ip(mut self, ip: SocketAddr) -> Self {
+        self.public_ip = Some(ip);
+        self
     }
 
     pub fn with_wallet(mut self, wallet: Arc<RwLock<Option<Wallet>>>) -> Self {
@@ -93,45 +105,126 @@ impl P2PNetwork {
         }
     }
 
+    fn save_peers_json(&self) {
+        if let Ok(known) = self.known_peers.try_read() {
+            let addrs: Vec<String> = known.iter().map(|a| a.to_string()).collect();
+            if let Ok(json) = serde_json::to_string_pretty(&addrs) {
+                let _ = std::fs::write("peers.json", json);
+            }
+        }
+    }
+
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind(self.our_address).await?;
         info!("P2P server listening on {}", self.our_address);
 
         let known_peers = self.known_peers.clone();
         let peers = self.peers.clone();
+        let peer_last_seen = self.peer_last_seen.clone();
+        let public_ip = self.public_ip;
+
+        // Channel for reconnection requests from the maintenance task
+        let (reconnect_tx, mut reconnect_rx) = tokio::sync::mpsc::unbounded_channel::<SocketAddr>();
+
+        // Periodic maintenance task: peer discovery, health check, reconnect
+        let maint_known = known_peers.clone();
+        let maint_peers = peers.clone();
+        let maint_last_seen = peer_last_seen.clone();
+        let maint_reconnect = reconnect_tx.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-                let known = known_peers.read().await;
+
+                // Announce our public IP to all connected peers
+                if let Some(our_ip) = public_ip {
+                    let my_peers_msg = Message::Peers(vec![our_ip]);
+                    let p = maint_peers.read().await;
+                    for (_, tx) in p.iter() {
+                        let msg = bincode::serialize(&my_peers_msg).unwrap_or_default();
+                        let data = encode_length_prefixed(&msg);
+                        let _ = tx.send(data);
+                    }
+                    drop(p);
+                }
+
+                // Request peers from all connected
+                let known = maint_known.read().await;
                 let peer_addrs: Vec<SocketAddr> = known.iter().cloned().collect();
                 drop(known);
-                for peer_addr in peer_addrs {
-                    let p = peers.read().await;
-                    if let Some(tx) = p.get(&peer_addr) {
+                for peer_addr in &peer_addrs {
+                    let p = maint_peers.read().await;
+                    if let Some(tx) = p.get(peer_addr) {
                         let msg = bincode::serialize(&Message::GetPeers).unwrap_or_default();
                         let data = encode_length_prefixed(&msg);
                         let _ = tx.send(data);
                     }
+                    drop(p);
                 }
-                info!("Peer discovery: requested peers from connected nodes");
+                info!("Peer discovery: announced self + requested peers");
+
+                // Health check: disconnect stale peers
+                let now = tokio::time::Instant::now();
+                let mut stale_addrs = Vec::new();
+                {
+                    let last_seen = maint_last_seen.read().await;
+                    let p = maint_peers.read().await;
+                    for (addr, _) in p.iter() {
+                        let last = last_seen.get(addr).copied().unwrap_or(now);
+                        if now.duration_since(last).as_secs() > PEER_TIMEOUT_SECS {
+                            stale_addrs.push(*addr);
+                            warn!("Peer {} stale (last seen {}s ago), disconnecting", addr, now.duration_since(last).as_secs());
+                        }
+                    }
+                }
+                for addr in &stale_addrs {
+                    let mut p = maint_peers.write().await;
+                    p.remove(addr);
+                    maint_last_seen.write().await.remove(addr);
+                    info!("Removed stale peer {}", addr);
+                }
+
+                // Try to maintain minimum peers
+                let connected_count = maint_peers.read().await.len();
+                if connected_count < config::MINIMUM_PEERS {
+                    let known = maint_known.read().await;
+                    let connected = maint_peers.read().await;
+                    for addr in known.iter() {
+                        if !connected.contains_key(addr) {
+                            let _ = maint_reconnect.send(*addr);
+                            if connected_count >= config::MINIMUM_PEERS {
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         });
 
         loop {
-            match listener.accept().await {
-                Ok((stream, addr)) => {
-                    info!("New peer connected: {}", addr);
-                    {
-                        let mut known = self.known_peers.write().await;
-                        if !known.contains(&addr) {
-                            known.push(addr);
-                            self.save_peers_sync();
+            tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok((stream, addr)) => {
+                            info!("New peer connected: {}", addr);
+                            {
+                                let mut known = self.known_peers.write().await;
+                                if !known.contains(&addr) {
+                                    known.push(addr);
+                                    self.save_peers_sync();
+                                    self.save_peers_json();
+                                }
+                            }
+                            self.spawn_peer(stream, addr).await;
+                        }
+                        Err(e) => {
+                            error!("Failed to accept connection: {}", e);
                         }
                     }
-                    self.spawn_peer(stream, addr).await;
                 }
-                Err(e) => {
-                    error!("Failed to accept connection: {}", e);
+                Some(addr) = reconnect_rx.recv() => {
+                    if let Err(e) = self.connect_to_peer(addr).await {
+                        warn!("Failed to reconnect to {}: {}", addr, e);
+                    }
                 }
             }
         }
@@ -144,6 +237,14 @@ impl P2PNetwork {
         let stream = TcpStream::connect(addr).await?;
         info!("Connected to peer: {}", addr);
         self.spawn_peer(stream, addr).await;
+
+        // Announce our public IP if set
+        if let Some(our_ip) = self.public_ip {
+            let announce = Message::Peers(vec![our_ip]);
+            self.send_to(&addr, &announce).await;
+            info!("Announced our public IP {} to peer {}", our_ip, addr);
+        }
+
         self.send_to(&addr, &Message::Ping(crate::PROTOCOL_VERSION as u64)).await;
 
         {
@@ -151,7 +252,13 @@ impl P2PNetwork {
             if !known.contains(&addr) {
                 known.push(addr);
                 self.save_peers_sync();
+                self.save_peers_json();
             }
+        }
+
+        {
+            let mut last_seen = self.peer_last_seen.write().await;
+            last_seen.insert(addr, tokio::time::Instant::now());
         }
 
         Ok(())
@@ -166,7 +273,13 @@ impl P2PNetwork {
             peers.insert(addr, tx);
         }
 
+        {
+            let mut last_seen = self.peer_last_seen.write().await;
+            last_seen.insert(addr, tokio::time::Instant::now());
+        }
+
         let peers_writer = self.peers.clone();
+        let peer_last_seen_writer = self.peer_last_seen.clone();
 
         tokio::spawn(async move {
             use tokio::io::AsyncWriteExt;
@@ -182,6 +295,7 @@ impl P2PNetwork {
             }
             let mut p = peers_writer.write().await;
             p.remove(&addr);
+            peer_last_seen_writer.write().await.remove(&addr);
             info!("Peer {} write task ended", addr);
         });
 
@@ -192,6 +306,7 @@ impl P2PNetwork {
         let wallet = self.wallet.clone();
         let storage = self.storage.clone();
         let our_addr = self.our_address;
+        let peer_last_seen = self.peer_last_seen.clone();
 
         tokio::spawn(async move {
             let mut read_half = read_half;
@@ -199,6 +314,8 @@ impl P2PNetwork {
                 let result = read_message_inner(&mut read_half).await;
                 match result {
                     Ok(Some(msg)) => {
+                        // Update last seen timestamp
+                        peer_last_seen.write().await.insert(addr, tokio::time::Instant::now());
                         let peers_snapshot = peers_clone.read().await.clone();
                         handle_message2(msg, &addr, peers_snapshot, &blockchain, &known_peers, &mempool, &wallet, &storage, our_addr).await;
                     }
@@ -214,6 +331,7 @@ impl P2PNetwork {
             }
             let mut p = peers_clone.write().await;
             p.remove(&addr);
+            peer_last_seen.write().await.remove(&addr);
             info!("Peer {} read task ended", addr);
         });
     }
@@ -411,6 +529,12 @@ async fn handle_message2(
                     if let Ok(s) = st.lock() {
                         let _ = s.save_peers(&known);
                     }
+                }
+                // Also persist to peers.json for new nodes
+                let known = known_peers.read().await;
+                let addrs: Vec<String> = known.iter().map(|a| a.to_string()).collect();
+                if let Ok(json) = serde_json::to_string_pretty(&addrs) {
+                    let _ = std::fs::write("peers.json", json);
                 }
             }
             info!("Discovered {} peers from {}", count, addr);
